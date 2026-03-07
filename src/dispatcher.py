@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,6 +134,9 @@ async def setup_worktree(
             "git", "worktree", "remove", "--force",
             str(worktree_path), cwd=repo_path,
         )
+
+    # Delete stale branch from a previous attempt (makes re-queue idempotent)
+    await run_cmd("git", "branch", "-D", branch_name, cwd=repo_path)
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -395,6 +399,8 @@ async def create_pr(
     pr_number = extract_pr_number_from_url(pr_url)
     if pr_number:
         await db.update_task(task["id"], pr_number=pr_number)
+    else:
+        log.warning("Could not extract PR number from URL: %s", pr_url)
     log.info("Created PR: %s", pr_url)
     return pr_url
 
@@ -615,6 +621,28 @@ async def retry_with_ci_context(
     await db.add_log(task_id, f"Retry #{task['retry_count']}: pushed fixes, awaiting CI")
 
 
+async def sync_agent_credentials(config: Config):
+    """Copy admin's Claude credentials to agent user if they're newer."""
+    if not config.agent_user:
+        return
+    admin_cred = Path.home() / ".claude" / ".credentials.json"
+    agent_cred = Path(f"/home/{config.agent_user}/.claude/.credentials.json")
+    if not admin_cred.exists():
+        return
+    try:
+        if not agent_cred.exists() or admin_cred.stat().st_mtime > agent_cred.stat().st_mtime:
+            log.info("Syncing Claude credentials to %s", config.agent_user)
+            rc, _, err = await run_cmd(
+                "sudo", "install", "-m", "600",
+                "-o", config.agent_user, "-g", "voltron",
+                str(admin_cred), str(agent_cred),
+            )
+            if rc != 0:
+                log.warning("Failed to sync credentials: %s", err.strip())
+    except OSError as e:
+        log.warning("Credential sync check failed: %s", e)
+
+
 async def dispatch_task(task: dict, config: Config, db: Database):
     """Full lifecycle: fetch → worktree → agent → PR."""
     task_id = task["id"]
@@ -637,6 +665,9 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 repo_path, task_id, branch, repo["default_branch"],
             )
             await db.update_task(task_id, worktree_path=str(worktree_path))
+
+        # Ensure agent credentials are fresh before launching
+        await sync_agent_credentials(config)
 
         # Run agent
         await db.add_log(task_id, "Running agent...")
@@ -737,11 +768,39 @@ async def dispatch_task(task: dict, config: Config, db: Database):
 
     except Exception as e:
         log.exception("Task %d failed", task_id)
+        err_str = str(e)[:2000]
         now = datetime.now(timezone.utc).isoformat()
-        await db.update_task(
-            task_id,
-            status="failed",
-            error_message=str(e)[:2000],
-            completed_at=now,
-        )
-        await db.add_log(task_id, f"Fatal error: {e}", level="error")
+
+        # Auto-retry on transient infrastructure failures
+        transient_patterns = [
+            "authentication_error", "EACCES", "permission denied",
+            "branch named", "already exists", "No such file or directory",
+        ]
+        retry_count = task.get("retry_count", 0)
+        is_transient = any(p.lower() in err_str.lower() for p in transient_patterns)
+
+        if is_transient and retry_count < 2:
+            new_count = retry_count + 1
+            await db.update_task(
+                task_id,
+                status="queued",
+                error_message=None,
+                started_at=None,
+                branch_name=None,
+                worktree_path=None,
+                retry_count=new_count,
+            )
+            await db.add_log(
+                task_id,
+                f"Transient error, auto-retry {new_count}/2: {err_str[:200]}",
+                level="warn",
+            )
+            log.info("Task %d: transient error, auto-retry %d/2", task_id, new_count)
+        else:
+            await db.update_task(
+                task_id,
+                status="failed",
+                error_message=err_str,
+                completed_at=now,
+            )
+            await db.add_log(task_id, f"Fatal error: {e}", level="error")

@@ -7,9 +7,10 @@ import signal
 
 from .config import Config, load_config
 from .db import Database
-from .dispatcher import dispatch_task, retry_with_ci_context, run_review
+from .dispatcher import dispatch_task, retry_with_ci_context, run_review, sync_agent_credentials
 from .github import (
-    close_issue, close_pr, comment_on_issue, comment_on_pr, find_new_issues,
+    close_issue, close_pr, comment_on_issue, comment_on_pr,
+    extract_pr_number_from_url, find_new_issues,
     claim_issue, get_ci_failure_logs, get_pr_ci_status, merge_pr,
     repo_full_name_from_url, update_issue_labels,
 )
@@ -86,13 +87,13 @@ class WorkerDaemon:
                             f"Created from issue #{issue.number}: {issue.title[:80]}",
                         )
 
-                        # Claim on GitHub (add in-progress label, remove voltron label)
-                        await claim_issue(repo_full, issue.number)
-
                         log.info(
                             "Issue #%d -> Task #%d: %s",
                             issue.number, task_id, issue.title[:60],
                         )
+
+                        # Claim on GitHub AFTER task creation succeeds
+                        await claim_issue(repo_full, issue.number)
 
             except Exception:
                 log.exception("Error in issue poller loop")
@@ -143,6 +144,14 @@ class WorkerDaemon:
 
                     task_id = task["id"]
                     pr_number = task.get("pr_number")
+
+                    # Backfill pr_number from pr_url if missing
+                    if not pr_number and task.get("pr_url"):
+                        pr_number = extract_pr_number_from_url(task["pr_url"])
+                        if pr_number:
+                            await self.db.update_task(task_id, pr_number=pr_number)
+                            log.info("Task #%d: backfilled pr_number=%d from URL", task_id, pr_number)
+
                     if not pr_number:
                         continue
 
@@ -373,17 +382,51 @@ async def _run_worker():
     await db.connect()
     log.info("Database connected: %s", config.db_path)
 
-    # Recover stale 'reviewing' tasks from previous crash/restart
+    # Recover stale tasks from previous crash/restart
     async with db._write_lock:
+        # Reviewing → pr_created (re-review)
         async with db.db.execute(
             "UPDATE tasks SET status = 'pr_created', review_summary = NULL "
             "WHERE status = 'reviewing' RETURNING id"
         ) as cur:
-            recovered = [dict(r) for r in await cur.fetchall()]
-            await db.db.commit()
-    if recovered:
-        ids = [r["id"] for r in recovered]
-        log.info("Recovered %d stale reviewing tasks: %s", len(ids), ids)
+            recovered_reviewing = [r[0] for r in await cur.fetchall()]
+        # Working → queued (re-dispatch)
+        async with db.db.execute(
+            "UPDATE tasks SET status = 'queued', started_at = NULL, "
+            "error_message = NULL, agent_pid = NULL, branch_name = NULL, "
+            "worktree_path = NULL "
+            "WHERE status = 'working' RETURNING id"
+        ) as cur:
+            recovered_working = [r[0] for r in await cur.fetchall()]
+        await db.db.commit()
+    if recovered_reviewing:
+        log.info("Recovered %d stale reviewing tasks: %s", len(recovered_reviewing), recovered_reviewing)
+    if recovered_working:
+        log.info("Recovered %d stale working tasks: %s", len(recovered_working), recovered_working)
+
+    # Preflight checks
+    log.info("Running preflight checks...")
+    preflight_ok = True
+
+    # Check agent user can access repos
+    if config.agent_user:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-u", config.agent_user, "test", "-r", str(config.repos_dir),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if proc.returncode != 0:
+            log.error("PREFLIGHT FAIL: %s cannot read %s", config.agent_user, config.repos_dir)
+            preflight_ok = False
+        else:
+            log.info("Preflight OK: agent user can access repos")
+
+        # Sync credentials if needed
+        await sync_agent_credentials(config)
+
+    if not preflight_ok:
+        log.error("Preflight checks failed — starting anyway but tasks may fail")
 
     daemon = WorkerDaemon(config, db)
 

@@ -395,12 +395,12 @@ class Database:
                 return cur.lastrowid
 
     async def get_task_by_issue(self, repo_id: int, issue_number: int) -> dict | None:
-        """Check if an issue already has an active task (dedup). Excludes cancelled/failed."""
+        """Check if an issue already has a task (dedup). Only excludes cancelled."""
         async with self.db.execute(
             "SELECT t.*, r.name as repo_name FROM tasks t "
             "JOIN repos r ON t.repo_id = r.id "
             "WHERE t.repo_id = ? AND t.github_issue_number = ? "
-            "AND t.status NOT IN ('cancelled', 'failed') "
+            "AND t.status != 'cancelled' "
             "LIMIT 1",
             (repo_id, issue_number),
         ) as cur:
