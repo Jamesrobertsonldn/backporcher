@@ -6,7 +6,7 @@ import aiosqlite
 from pathlib import Path
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -219,6 +219,16 @@ CREATE INDEX IF NOT EXISTS idx_tasks_repo_id ON tasks(repo_id);
         conn.execute("PRAGMA foreign_keys=ON")
         conn.commit()
 
+    if version < 4:
+        # v4: add verify_command to repos
+        try:
+            conn.execute("ALTER TABLE repos ADD COLUMN verify_command TEXT")
+        except Exception:
+            pass  # Column already exists
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        conn.commit()
+
 
 def _init_and_migrate_sync(db_path: Path):
     """Initialize base tables and run migration using a sync connection."""
@@ -233,6 +243,7 @@ CREATE TABLE IF NOT EXISTS repos (
     github_url TEXT NOT NULL,
     local_path TEXT NOT NULL,
     default_branch TEXT DEFAULT 'main',
+    verify_command TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -315,6 +326,17 @@ class Database:
             ) as cur:
                 await self.db.commit()
                 return cur.lastrowid
+
+    async def update_repo(self, repo_id: int, **fields):
+        allowed = {"verify_command", "default_branch"}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+        if not fields:
+            return
+        async with self._write_lock:
+            sets = ", ".join(f"{k} = ?" for k in fields)
+            vals = list(fields.values()) + [repo_id]
+            await self.db.execute(f"UPDATE repos SET {sets} WHERE id = ?", vals)
+            await self.db.commit()
 
     # --- Tasks ---
 
@@ -505,6 +527,7 @@ CREATE TABLE IF NOT EXISTS repos (
     github_url TEXT NOT NULL,
     local_path TEXT NOT NULL,
     default_branch TEXT DEFAULT 'main',
+    verify_command TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -554,6 +577,16 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
         )
         self.db.commit()
         return cur.lastrowid
+
+    def update_repo(self, repo_id: int, **fields):
+        allowed = {"verify_command", "default_branch"}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+        if not fields:
+            return
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        vals = list(fields.values()) + [repo_id]
+        self.db.execute(f"UPDATE repos SET {sets} WHERE id = ?", vals)
+        self.db.commit()
 
     def create_task(self, repo_id: int, prompt: str, model: str = "sonnet") -> int:
         cur = self.db.execute(

@@ -33,6 +33,9 @@ class Config:
     # Coordinator review
     coordinator_model: str = "sonnet"
 
+    # Build verification
+    max_verify_retries: int = 2
+
 
 def load_config() -> Config:
     """Load config from environment variables."""
@@ -68,4 +71,5 @@ def load_config() -> Config:
         ),
         allowed_github_users=allowed_users,
         coordinator_model=os.environ.get("VOLTRON_COORDINATOR_MODEL", "sonnet"),
+        max_verify_retries=int(os.environ.get("VOLTRON_MAX_VERIFY_RETRIES", "2")),
     )

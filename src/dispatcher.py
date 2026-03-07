@@ -289,6 +289,38 @@ async def run_agent(
     return proc.returncode, output_summary
 
 
+async def run_verify(
+    worktree_path: Path, verify_command: str, task_id: int, db: Database,
+) -> tuple[bool, str]:
+    """Run repo's verify command in the worktree. Returns (passed, output)."""
+    log.info("Task #%d: running verify: %s", task_id, verify_command)
+    await db.add_log(task_id, f"Running verify: {verify_command}")
+
+    proc = await asyncio.create_subprocess_exec(
+        "bash", "-c", verify_command,
+        cwd=str(worktree_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, "Verify command timed out after 300s"
+
+    output = stdout.decode(errors="replace")
+    if proc.returncode == 0:
+        await db.add_log(task_id, "Verify passed")
+        return True, output
+
+    # Truncate to last 3000 chars (most relevant part)
+    if len(output) > 3000:
+        output = "...(truncated)...\n" + output[-3000:]
+    await db.add_log(task_id, f"Verify failed (exit {proc.returncode})", level="warn")
+    return False, output
+
+
 async def create_pr(
     worktree_path: Path, task: dict, repo: dict, db: Database,
 ) -> str | None:
@@ -604,6 +636,56 @@ async def dispatch_task(task: dict, config: Config, db: Database):
             )
             await db.add_log(task_id, f"Agent failed (exit {exit_code})", level="error")
             return
+
+        # Build verification loop
+        verify_command = repo.get("verify_command")
+        if verify_command:
+            for attempt in range(1, config.max_verify_retries + 2):  # +2: initial + retries
+                passed, verify_output = await run_verify(
+                    worktree_path, verify_command, task_id, db,
+                )
+                if passed:
+                    break
+
+                if attempt > config.max_verify_retries:
+                    now = datetime.now(timezone.utc).isoformat()
+                    await db.update_task(
+                        task_id, status="failed",
+                        error_message=f"Verify failed after {config.max_verify_retries} fix attempts",
+                        completed_at=now,
+                    )
+                    await db.add_log(
+                        task_id,
+                        f"Verify failed after {config.max_verify_retries} retries, giving up",
+                        level="error",
+                    )
+                    return
+
+                # Re-run agent with verify failure context
+                await db.add_log(
+                    task_id,
+                    f"Verify fix attempt {attempt}/{config.max_verify_retries}",
+                )
+                fix_prompt = (
+                    f"{task['prompt']}\n\n"
+                    f"---\n"
+                    f"IMPORTANT: Your previous changes failed the build/test verification.\n"
+                    f"The verify command `{verify_command}` failed with this output:\n\n"
+                    f"```\n{verify_output}\n```\n\n"
+                    f"Fix the errors and make sure the build passes."
+                )
+                fix_task = dict(task)
+                fix_task["prompt"] = fix_prompt
+                exit_code, summary = await run_agent(fix_task, worktree_path, config, db)
+                if exit_code != 0:
+                    now = datetime.now(timezone.utc).isoformat()
+                    await db.update_task(
+                        task_id, status="failed",
+                        error_message=f"Verify fix agent exited with code {exit_code}",
+                        completed_at=now,
+                    )
+                    await db.add_log(task_id, f"Verify fix agent failed (exit {exit_code})", level="error")
+                    return
 
         # Create PR
         await db.add_log(task_id, "Creating pull request...")

@@ -50,7 +50,25 @@ def cmd_repo_list(args):
         print("No repos configured. Use: voltron repo add <url>")
         return
     for r in repos:
-        print(f"  {r['id']:3d}  {r['name']:<20s}  {r['github_url']}")
+        verify = f"  verify: {r['verify_command']}" if r.get("verify_command") else ""
+        print(f"  {r['id']:3d}  {r['name']:<20s}  {r['github_url']}{verify}")
+    db.close()
+
+
+def cmd_repo_verify(args):
+    db = get_db()
+    repo = db.get_repo_by_name(args.name)
+    if not repo:
+        print(f"Repo '{args.name}' not found")
+        sys.exit(1)
+
+    command = " ".join(args.verify_cmd) if args.verify_cmd else None
+    db.update_repo(repo["id"], verify_command=command)
+
+    if command:
+        print(f"Set verify command for '{args.name}': {command}")
+    else:
+        print(f"Cleared verify command for '{args.name}'")
     db.close()
 
 
@@ -320,6 +338,10 @@ def main():
 
     repo_sub.add_parser("list", help="List repos")
 
+    repo_verify = repo_sub.add_parser("verify", help="Set build/test verify command")
+    repo_verify.add_argument("name", help="Repo name")
+    repo_verify.add_argument("verify_cmd", nargs="*", help="Verify command (omit to clear)")
+
     # fleet
     sub.add_parser("fleet", help="Fleet dashboard — active work overview")
 
@@ -345,6 +367,8 @@ def main():
             cmd_repo_add(args)
         elif args.repo_command == "list":
             cmd_repo_list(args)
+        elif args.repo_command == "verify":
+            cmd_repo_verify(args)
         else:
             repo_parser.print_help()
     elif args.command == "fleet":
