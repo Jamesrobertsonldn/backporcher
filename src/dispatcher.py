@@ -716,18 +716,25 @@ async def sync_agent_credentials(config: Config):
     agent_cred = Path(f"/home/{config.agent_user}/.claude/.credentials.json")
     if not admin_cred.exists():
         return
-    try:
-        if not agent_cred.exists() or admin_cred.stat().st_mtime > agent_cred.stat().st_mtime:
-            log.info("Syncing Claude credentials to %s", config.agent_user)
-            rc, _, err = await run_cmd(
-                "sudo", "install", "-m", "600",
-                "-o", config.agent_user, "-g", "voltron",
-                str(admin_cred), str(agent_cred),
-            )
-            if rc != 0:
-                log.warning("Failed to sync credentials: %s", err.strip())
-    except OSError as e:
-        log.warning("Credential sync check failed: %s", e)
+    # Use sudo stat to check agent cred mtime (file is 600 owned by agent user)
+    need_sync = True
+    rc, out, _ = await run_cmd("sudo", "stat", "-c", "%Y", str(agent_cred))
+    if rc == 0:
+        try:
+            agent_mtime = float(out.strip())
+            need_sync = admin_cred.stat().st_mtime > agent_mtime
+        except (ValueError, OSError):
+            pass
+
+    if need_sync:
+        log.info("Syncing Claude credentials to %s", config.agent_user)
+        rc, _, err = await run_cmd(
+            "sudo", "install", "-m", "600",
+            "-o", config.agent_user, "-g", "voltron",
+            str(admin_cred), str(agent_cred),
+        )
+        if rc != 0:
+            log.warning("Failed to sync credentials: %s", err.strip())
 
 
 async def dispatch_task(task: dict, config: Config, db: Database):
