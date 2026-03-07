@@ -9,9 +9,9 @@ from .config import Config, load_config
 from .db import Database
 from .dispatcher import dispatch_task, retry_with_ci_context, run_review
 from .github import (
-    close_pr, comment_on_issue, comment_on_pr, find_new_issues, claim_issue,
-    get_ci_failure_logs, get_pr_ci_status, merge_pr, repo_full_name_from_url,
-    update_issue_labels,
+    close_issue, close_pr, comment_on_issue, comment_on_pr, find_new_issues,
+    claim_issue, get_ci_failure_logs, get_pr_ci_status, merge_pr,
+    repo_full_name_from_url, update_issue_labels,
 )
 
 log = logging.getLogger("voltron.worker")
@@ -267,8 +267,9 @@ class WorkerDaemon:
             )
             await comment_on_issue(
                 repo_full, issue_num,
-                "CI passed. PR has been merged.",
+                "CI passed. PR has been merged. Closing issue.",
             )
+            await close_issue(repo_full, issue_num)
 
     async def _handle_ci_failure(self, task: dict, repo_full: str, ci):
         """CI failed — retry or mark failed."""

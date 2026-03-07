@@ -155,6 +155,22 @@ async def comment_on_issue(
     return True
 
 
+async def close_issue(
+    repo_full_name: str, number: int, reason: str = "completed",
+) -> bool:
+    """Close an issue."""
+    rc, _, err = await _run_gh(
+        "issue", "close",
+        "--repo", repo_full_name,
+        str(number),
+        "--reason", reason,
+    )
+    if rc != 0:
+        log.error("Failed to close issue #%d: %s", number, err.strip())
+        return False
+    return True
+
+
 async def update_issue_labels(
     repo_full_name: str, number: int,
     add: list[str] | None = None,
