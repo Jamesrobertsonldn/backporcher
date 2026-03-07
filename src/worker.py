@@ -162,34 +162,37 @@ class WorkerDaemon:
         # Build issue_number -> issue object lookup
         issue_by_number = {i.number: i for i in issues}
 
-        # Two-pass creation: first create all tasks, then set dependencies
-        # Pass 1: create tasks without dependencies
+        # Create tasks in priority order. Since dependencies always point to
+        # lower-priority (already-created) tasks, we can resolve depends_on_task_id
+        # inline — no second pass needed, eliminating the race where the executor
+        # claims a task before its dependency is set.
         issue_to_task_id: dict[int, int] = {}
         for entry in sorted(plan, key=lambda e: e["priority"]):
             issue = issue_by_number.get(entry["issue_number"])
             if not issue:
                 continue
+
+            # Resolve dependency to task_id (already created since lower priority)
+            dep_task_id = None
+            dep_issue = entry.get("depends_on")
+            if dep_issue is not None:
+                dep_task_id = issue_to_task_id.get(dep_issue)
+                if dep_issue and not dep_task_id:
+                    log.warning(
+                        "Issue #%d depends on #%d but no task found (created yet?), ignoring dep",
+                        entry["issue_number"], dep_issue,
+                    )
+
             task_id = await self._create_task_for_issue(
                 repo, repo_full, issue,
                 model=entry["model"],
                 reason=entry["reason"],
                 priority=entry["priority"],
+                depends_on_task_id=dep_task_id,
             )
             issue_to_task_id[entry["issue_number"]] = task_id
 
-        # Pass 2: set depends_on_task_id where needed
-        for entry in plan:
-            dep_issue = entry.get("depends_on")
-            if dep_issue is None:
-                continue
-            task_id = issue_to_task_id.get(entry["issue_number"])
-            dep_task_id = issue_to_task_id.get(dep_issue)
-            if task_id and dep_task_id:
-                await self.db.update_task(task_id, depends_on_task_id=dep_task_id)
-                await self.db.add_log(
-                    task_id,
-                    f"Dependency set: blocked by task #{dep_task_id} (issue #{dep_issue})",
-                )
+            if dep_task_id:
                 log.info(
                     "Task #%d depends on task #%d (issue #%d -> #%d)",
                     task_id, dep_task_id, entry["issue_number"], dep_issue,
