@@ -242,6 +242,19 @@ pip install -e . && sudo systemctl restart voltron
 - **Markdown in verdicts:** The coordinator model sometimes wraps `VERDICT: APPROVE` in `**bold**` markers. The parser strips `*` and `_` before matching.
 - **Credential expiry:** Claude credentials expire periodically. The auto-sync compares mtimes, but if admin credentials also expire, re-authenticate via `claude` CLI as administrator.
 - **Directory permissions:** The `voltron-agent` user accesses repos via group membership (`voltron` group). If permissions break, re-run `scripts/setup-sandbox.sh`.
+- **Task reset procedure:** Never reset tasks via SQL while the daemon is running — the executor claims them immediately. Always: stop daemon, kill agent processes, reset DB, start daemon. See `docs/solutions/daemon-task-reset-race.md`.
+- **Model selection:** Sonnet struggles with multi-file refactoring (may commit only auto-generated files). Use opus for architectural changes, state extraction, or any task touching 3+ files. See `docs/solutions/opus-for-complex-refactoring.md`.
+- **System deps for verify:** Tauri projects need GTK/Cairo dev packages for `cargo check --workspace` (`libcairo2-dev`, `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, etc.). Missing deps cause silent verify failures.
+
+## Solutions Directory
+
+`docs/solutions/` is the institutional knowledge base. Every solved problem becomes searchable documentation. Before starting work on a problem, search solutions first:
+
+```bash
+grep -r "relevant keyword" docs/solutions/
+```
+
+After solving a non-trivial problem, capture it using the template at `docs/solutions/TEMPLATE.md`. Include: problem, root cause, solution code, prevention strategy.
 
 ## Development
 
