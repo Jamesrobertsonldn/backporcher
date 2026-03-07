@@ -119,7 +119,9 @@ def cmd_fleet(args):
             badge = _status_badge(t["status"])
             issue = f" (#{t['github_issue_number']})" if t.get("github_issue_number") else ""
             retry = f" [retry {t['retry_count']}]" if t.get("retry_count", 0) > 0 else ""
-            line = f"  #{t['id']:3d} [{badge}] {t['repo_name']:<15s}{issue}{retry} {t['prompt'][:50]}"
+            pri = f" P{t['priority']}" if t.get("priority") is not None and t["priority"] != 100 else ""
+            dep = f" blocked-by:#{t['depends_on_task_id']}" if t.get("depends_on_task_id") else ""
+            line = f"  #{t['id']:3d} [{badge}] {t['repo_name']:<15s}{issue}{pri}{dep}{retry} {t['prompt'][:50]}"
             if t.get("pr_url"):
                 line += f"  {t['pr_url']}"
             print(line)
@@ -158,6 +160,10 @@ def cmd_status(args):
         print(f"  Prompt:  {task['prompt'][:100]}")
         if task.get("github_issue_number"):
             print(f"  Issue:   #{task['github_issue_number']}")
+        if task.get("priority") is not None and task["priority"] != 100:
+            print(f"  Priority: {task['priority']}")
+        if task.get("depends_on_task_id"):
+            print(f"  Depends: task #{task['depends_on_task_id']}")
         if task.get("branch_name"):
             print(f"  Branch:  {task['branch_name']}")
         if task.get("pr_url"):
@@ -250,6 +256,11 @@ def cmd_cancel(args):
         db.update_task(task["id"], status="cancelled", completed_at=now)
         db.add_log(task["id"], "Cancelled by user", level="warn")
         print(f"Cancelled running task #{task['id']} (pid={pid})")
+
+    # Cascade failure to dependent tasks
+    cascaded = db.handle_dependency_failure(task["id"])
+    if cascaded:
+        print(f"  Cascaded failure to {len(cascaded)} dependent task(s): {cascaded}")
 
     # Restore GitHub labels if this task came from an issue
     issue_num = task.get("github_issue_number")

@@ -6,7 +6,7 @@ import aiosqlite
 from pathlib import Path
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -126,7 +126,7 @@ def _migrate_sync(conn):
     version = _get_schema_version(conn)
 
     if version == 0:
-        # Fresh database — create v3 tasks table directly (repos/task_logs already created)
+        # Fresh database — create current tasks table directly (repos/task_logs already created)
         conn.executescript("""
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,6 +147,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     github_issue_url TEXT,
     pr_number INTEGER,
     retry_count INTEGER DEFAULT 0,
+    priority INTEGER DEFAULT 100,
+    depends_on_task_id INTEGER,
     started_at TEXT,
     completed_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
@@ -154,6 +156,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_repo_id ON tasks(repo_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
 """)
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -225,6 +228,21 @@ CREATE INDEX IF NOT EXISTS idx_tasks_repo_id ON tasks(repo_id);
             conn.execute("ALTER TABLE repos ADD COLUMN verify_command TEXT")
         except Exception:
             pass  # Column already exists
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        conn.commit()
+
+    if version < 5:
+        # v5: add priority and depends_on_task_id to tasks
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 100")
+        except Exception:
+            pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN depends_on_task_id INTEGER")
+        except Exception:
+            pass  # Column already exists
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority)")
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         conn.commit()
@@ -383,13 +401,14 @@ class Database:
     async def create_task_from_issue(
         self, repo_id: int, prompt: str, model: str,
         issue_number: int, issue_url: str,
+        priority: int = 100, depends_on_task_id: int | None = None,
     ) -> int:
         """Create a task linked to a GitHub issue."""
         async with self._write_lock:
             async with self.db.execute(
-                "INSERT INTO tasks (repo_id, prompt, model, github_issue_number, github_issue_url) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (repo_id, prompt, model, issue_number, issue_url),
+                "INSERT INTO tasks (repo_id, prompt, model, github_issue_number, github_issue_url, priority, depends_on_task_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (repo_id, prompt, model, issue_number, issue_url, priority, depends_on_task_id),
             ) as cur:
                 await self.db.commit()
                 return cur.lastrowid
@@ -426,13 +445,25 @@ class Database:
             return [dict(r) for r in await cur.fetchall()]
 
     async def claim_next_queued(self) -> dict | None:
-        """Atomically claim the oldest queued task."""
+        """Atomically claim the highest-priority queued task whose dependencies are met."""
         async with self._write_lock:
             now = datetime.now(timezone.utc).isoformat()
             async with self.db.execute(
                 "UPDATE tasks SET status = 'working', started_at = ? "
-                "WHERE id = (SELECT id FROM tasks WHERE status = 'queued' "
-                "ORDER BY created_at ASC LIMIT 1) RETURNING *",
+                "WHERE id = ("
+                "  SELECT t.id FROM tasks t"
+                "  WHERE t.status = 'queued'"
+                "    AND ("
+                "      t.depends_on_task_id IS NULL"
+                "      OR EXISTS ("
+                "        SELECT 1 FROM tasks dep"
+                "        WHERE dep.id = t.depends_on_task_id"
+                "          AND dep.status = 'completed'"
+                "      )"
+                "    )"
+                "  ORDER BY t.priority ASC, t.created_at ASC"
+                "  LIMIT 1"
+                ") RETURNING *",
                 (now,),
             ) as cur:
                 row = await cur.fetchone()
@@ -457,6 +488,7 @@ class Database:
             "review_summary",
             "started_at", "completed_at",
             "pr_number", "github_issue_number", "github_issue_url", "retry_count",
+            "priority", "depends_on_task_id",
         }
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
@@ -466,6 +498,29 @@ class Database:
             vals = list(fields.values()) + [task_id]
             await self.db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", vals)
             await self.db.commit()
+
+    async def handle_dependency_failure(self, failed_task_id: int) -> list[int]:
+        """Cascade failure to queued tasks that depend on the failed task."""
+        async with self._write_lock:
+            now = datetime.now(timezone.utc).isoformat()
+            async with self.db.execute(
+                "UPDATE tasks SET status = 'failed', "
+                "error_message = 'Dependency task #' || ? || ' failed', "
+                "completed_at = ? "
+                "WHERE depends_on_task_id = ? AND status = 'queued' "
+                "RETURNING id",
+                (str(failed_task_id), now, failed_task_id),
+            ) as cur:
+                rows = await cur.fetchall()
+                await self.db.commit()
+                cascaded_ids = [r[0] for r in rows]
+
+        # Recursively cascade to dependents of dependents
+        all_cascaded = list(cascaded_ids)
+        for cid in cascaded_ids:
+            sub = await self.handle_dependency_failure(cid)
+            all_cascaded.extend(sub)
+        return all_cascaded
 
     async def count_active(self) -> int:
         async with self.db.execute(
@@ -648,6 +703,7 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
             "review_summary",
             "started_at", "completed_at",
             "pr_number", "github_issue_number", "github_issue_url", "retry_count",
+            "priority", "depends_on_task_id",
         }
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
@@ -656,6 +712,27 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
         vals = list(fields.values()) + [task_id]
         self.db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", vals)
         self.db.commit()
+
+    def handle_dependency_failure(self, failed_task_id: int) -> list[int]:
+        """Cascade failure to queued tasks that depend on the failed task."""
+        now = datetime.now(timezone.utc).isoformat()
+        cur = self.db.execute(
+            "UPDATE tasks SET status = 'failed', "
+            "error_message = 'Dependency task #' || ? || ' failed', "
+            "completed_at = ? "
+            "WHERE depends_on_task_id = ? AND status = 'queued' "
+            "RETURNING id",
+            (str(failed_task_id), now, failed_task_id),
+        )
+        rows = cur.fetchall()
+        self.db.commit()
+        cascaded_ids = [r[0] for r in rows]
+
+        all_cascaded = list(cascaded_ids)
+        for cid in cascaded_ids:
+            sub = self.handle_dependency_failure(cid)
+            all_cascaded.extend(sub)
+        return all_cascaded
 
     def count_active(self) -> int:
         cur = self.db.execute(

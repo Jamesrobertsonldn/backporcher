@@ -4,13 +4,13 @@ Parallel Claude Code agent dispatcher. Turn GitHub Issues into PRs automatically
 
 ## How it works
 
-1. Create a GitHub issue and add the `voltron` label
-2. Haiku triages the issue complexity and picks the right model (sonnet or opus)
-3. Voltron runs a sandboxed Claude agent in a git worktree
-4. Agent makes changes, Voltron creates a PR
-5. A coordinator agent reviews the diff for bugs, conflicts, and scope
+1. Create GitHub issues and add the `voltron` label
+2. Haiku batch-orchestrates multiple issues: assigns models, priorities, and dependency chains
+3. Voltron runs sandboxed Claude agents in git worktrees, respecting dependency order
+4. Agents make changes, Voltron creates PRs
+5. A coordinator agent reviews each diff for bugs, conflicts, and scope
 6. CI runs — failures auto-retry with error context (up to 3x)
-7. On success, PR is auto-merged (squash) and the issue is closed
+7. On success, PRs are auto-merged (squash) and issues are closed
 
 ## Quick Start
 
@@ -46,8 +46,8 @@ Four concurrent async loops:
 
 | Loop | Interval | Job |
 |------|----------|-----|
-| Issue Poller | 30s | Scans GitHub for `voltron`-labeled issues, triages complexity |
-| Task Executor | 5s | Runs Claude agents in sandboxed worktrees |
+| Issue Poller | 30s | Scans GitHub for `voltron`-labeled issues, batch-orchestrates priorities + dependencies |
+| Task Executor | 5s | Runs Claude agents in sandboxed worktrees, respects dependency order |
 | Coordinator | 15s | Reviews PRs for quality, conflicts, scope |
 | CI Monitor | 60s | Watches CI, auto-retries, auto-merges |
 
@@ -77,6 +77,7 @@ VOLTRON_MAX_CI_RETRIES=3         # CI retry limit
 - Credentials auto-synced when admin's are newer than agent's
 - Transient failures (auth, permissions) auto-retry instead of permanent failure
 - Stale branches cleaned up before worktree creation
+- Task failure cascades to all queued dependents in dependency chains
 
 ## Requirements
 

@@ -4,8 +4,8 @@
 
 ```
 GitHub Issue (label: voltron)
-  → Issue Poller → SQLite queue
-    → Task Executor → credential sync → claude -p → build verify → git push + gh pr create
+  → Issue Poller → Batch Orchestrator (haiku, 2+ issues) → SQLite queue (priority + deps)
+    → Task Executor (respects deps) → credential sync → claude -p → build verify → git push + gh pr create
       → Coordinator Review (claude -p reviews diff, checks conflicts)
         → CI Monitor → auto-merge PR → close issue
 ```
@@ -16,7 +16,7 @@ Voltron is a parallel Claude Code agent dispatcher. Create a GitHub issue, add t
 
 The worker daemon runs 4 async loops via `asyncio.gather()`:
 
-1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `voltron`, deduplicates, runs haiku triage to classify complexity (sonnet vs opus), creates tasks, claims issues
+1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `voltron`, deduplicates, batch-orchestrates 2+ issues per repo (haiku assigns priorities, dependencies, models), creates tasks with dependency chains, claims issues
 2. **Task Executor** (every 5s) — claims queued tasks, syncs credentials, runs `claude -p` in sandboxed worktrees, runs build verification, creates PRs. Auto-retries transient failures
 3. **Coordinator Reviewer** (every 15s) — reviews PR diffs via `claude -p`, approves or rejects with explanation
 4. **CI Monitor** (every 60s) — checks PR CI status on approved PRs, auto-merges passing PRs, auto-retries failures (up to 3x), closes issues on success
@@ -49,7 +49,7 @@ any    → cancelled (manual)
 | File | Purpose |
 |------|---------|
 | `src/github.py` | All `gh` CLI interactions (issues, labels, CI status, comments, merge, close) |
-| `src/db.py` | SQLite with schema migration (v1→v4), async + sync wrappers |
+| `src/db.py` | SQLite with schema migration (v1→v5), async + sync wrappers |
 | `src/config.py` | Env-var based config |
 | `src/dispatcher.py` | Worktree setup, credential sync, agent execution, build verify, PR creation, review runner |
 | `src/worker.py` | 4-loop daemon (issue poller, task executor, coordinator reviewer, CI monitor) |
@@ -65,6 +65,7 @@ any    → cancelled (manual)
 - **Transient auto-retry** — auth errors, EACCES, stale branches retry up to 2x
 - **PR number backfill** — extracts from URL if database field is NULL
 - **Preflight checks** — verifies agent access and credentials on startup
+- **Dependency failure cascade** — failed tasks cascade failure to all queued dependents
 
 ## Security
 

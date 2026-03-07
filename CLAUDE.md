@@ -7,23 +7,24 @@ Voltron is a parallel Claude Code agent dispatcher. GitHub Issues are the task q
 ```
 GitHub Issue (label: voltron)
   → Issue Poller (30s)
-    → SQLite queue
-      → Task Executor (semaphore: 2 concurrent)
-        → Credential sync (auto if stale)
-          → claude -p in sandboxed worktree
-            → Build verification (optional, per-repo)
-              → git push + gh pr create
-                → Coordinator Review (claude -p reviews diff)
-                  → CI Monitor (retries up to 3x on failure)
-                    → Auto-merge PR (squash)
-                      → Close issue (label: voltron-done)
+    → Batch Orchestrator (haiku, for 2+ issues per repo)
+      → SQLite queue (with priority + dependency chain)
+        → Task Executor (semaphore: 2 concurrent, respects dependencies)
+          → Credential sync (auto if stale)
+            → claude -p in sandboxed worktree
+              → Build verification (optional, per-repo)
+                → git push + gh pr create
+                  → Coordinator Review (claude -p reviews diff)
+                    → CI Monitor (retries up to 3x on failure)
+                      → Auto-merge PR (squash)
+                        → Close issue (label: voltron-done)
 ```
 
 ## Four Concurrent Loops
 
 The worker daemon (`src/worker.py`) runs 4 async loops via `asyncio.gather()`:
 
-1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `voltron`, deduplicates (including failed tasks), creates tasks, claims issues with `voltron-in-progress` label
+1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `voltron`, deduplicates (including failed tasks), batch-orchestrates 2+ issues per repo (assigns priorities, dependencies, models via haiku), creates tasks, claims issues with `voltron-in-progress` label
 2. **Task Executor** (every 5s) — claims queued tasks (bounded by semaphore), syncs credentials, runs `claude -p` in isolated worktrees, optionally runs build verification, creates PRs. Auto-retries transient failures (auth, permissions, stale branches)
 3. **Coordinator Reviewer** (every 15s) — reviews each PR diff via `claude -p`, checks for conflicts with other open PRs, approves or rejects. Backfills missing `pr_number` from `pr_url`
 4. **CI Monitor** (every 60s) — checks CI status on approved PRs, auto-merges passing PRs (squash), auto-retries failures with CI log context, closes GitHub issues on success
@@ -48,7 +49,7 @@ any    → cancelled (manual via CLI)
 | `src/cli.py` | CLI entry point: `fleet`, `status`, `cancel`, `cleanup`, `repo`, `worker` |
 | `src/worker.py` | Background daemon — 4 async loops, graceful shutdown, startup recovery, preflight checks |
 | `src/dispatcher.py` | Worktree setup, credential sync, agent execution, build verification, PR creation, coordinator review runner, CI retry, transient failure auto-retry |
-| `src/db.py` | SQLite with WAL mode, schema migrations (v1→v4), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
+| `src/db.py` | SQLite with WAL mode, schema migrations (v1→v5), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
 | `src/config.py` | `Config` dataclass populated from environment variables |
 | `src/github.py` | All `gh` CLI wrappers — issues, labels, PRs, CI status, diffs, comments, merge, close. Runs as `administrator`, never sandboxed |
 | `voltron.service` | systemd unit file with security hardening directives |
@@ -57,13 +58,13 @@ any    → cancelled (manual via CLI)
 
 ## Database
 
-SQLite with WAL mode at `data/voltron.db`. Schema version 4.
+SQLite with WAL mode at `data/voltron.db`. Schema version 5.
 
-**Tables:** `repos` (with `verify_command`), `tasks` (with `review_summary`, `pr_number`, `retry_count`), `task_logs`, `schema_version`
+**Tables:** `repos` (with `verify_command`), `tasks` (with `review_summary`, `pr_number`, `retry_count`, `priority`, `depends_on_task_id`), `task_logs`, `schema_version`
 
 **Concurrency:** All writes go through `asyncio.Lock` (`_write_lock`) to prevent SQLite write conflicts. `busy_timeout=5000ms` for reader contention. The sync wrapper (`SyncDatabase`) is used by CLI commands only.
 
-**Migrations:** Handled in `_migrate_sync()` — runs on every connect. Creates fresh v4 schema for new databases, or migrates existing v1→v2→v3→v4 via table recreation + ALTER TABLE.
+**Migrations:** Handled in `_migrate_sync()` — runs on every connect. Creates fresh v5 schema for new databases, or migrates existing v1→v2→v3→v4→v5 via table recreation + ALTER TABLE.
 
 **Dedup:** `get_task_by_issue()` checks all non-cancelled tasks for the same issue, preventing duplicate task creation even for failed tasks.
 
@@ -116,6 +117,21 @@ Only issues created by users in `VOLTRON_ALLOWED_USERS` are picked up. Prevents 
 4. **Transient failure auto-retry** — Auth errors, EACCES, stale branches, and missing directories auto-retry up to 2x instead of marking permanently failed.
 5. **PR number backfill** — If `pr_number` is NULL but `pr_url` exists, the coordinator extracts it automatically. Never blocks on missing data.
 6. **Startup preflight** — Verifies agent user can access repos directory and syncs credentials before entering poll loops.
+7. **Dependency failure cascade** — When a task fails, all queued tasks that depend on it (and their dependents) are automatically marked as failed.
+
+## Batch Orchestration
+
+When the issue poller finds 2+ new issues for the same repo, it batch-orchestrates them via a single haiku call instead of triaging each individually. The orchestrator:
+
+1. Assigns **model** (sonnet/opus) per issue based on complexity
+2. Assigns **priority** (1-N, lower = runs first)
+3. Identifies **dependencies** between issues (e.g., sequential file changes)
+
+Tasks are created in a two-pass process: first all tasks are inserted, then `depends_on_task_id` is set using the issue→task_id mapping. The executor skips blocked tasks (those whose dependency hasn't completed). If a task fails, failure cascades recursively to all queued dependents.
+
+Single new issues still use the existing `triage_issue()` haiku call. Opus-labeled issues bypass orchestration entirely.
+
+**Fallback:** If batch orchestration times out (90s) or returns invalid JSON, falls back to individual triage per issue.
 
 ## Build Verification
 

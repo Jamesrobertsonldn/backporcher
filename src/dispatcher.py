@@ -716,6 +716,156 @@ async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]
     return config.default_model, f"unparseable triage output"
 
 
+BATCH_ORCHESTRATE_PROMPT_TEMPLATE = """\
+You are a task orchestrator for a parallel code agent system. Given a batch of GitHub issues \
+for the same repository, analyze them together and produce a plan.
+
+## Models Available
+- **sonnet**: Fast, cheap. Bug fixes, single-file changes, config tweaks, docs.
+- **opus**: Slower, expensive. Multi-file refactors, architectural changes, complex features.
+
+## Issues (same repo: {repo_name})
+{issues_block}
+
+## Instructions
+For each issue, determine:
+1. **model**: "sonnet" or "opus"
+2. **priority**: integer 1 to {n_issues}. 1 = run first. No duplicates.
+3. **depends_on**: issue number this depends on, or null. Use when changes would conflict \
+or build upon another issue. Chains are fine (A -> B -> C). No circular dependencies.
+
+Rules:
+- Only set depends_on for genuine ordering requirements (file conflicts, sequential changes)
+- Independent issues can run in parallel (no dependency needed)
+- Priority reflects logical ordering: foundational changes first
+
+## Response Format
+Respond with ONLY a JSON array, no markdown fences:
+[
+  {{"issue_number": 1, "model": "sonnet", "priority": 1, "depends_on": null, "reason": "..."}},
+  {{"issue_number": 2, "model": "opus", "priority": 2, "depends_on": 1, "reason": "..."}}
+]
+"""
+
+
+async def orchestrate_batch(
+    issues: list[dict], repo_name: str, config: Config,
+) -> list[dict] | None:
+    """Batch-orchestrate multiple issues via haiku. Returns list of dicts with
+    issue_number, model, priority, depends_on, reason. Returns None on failure."""
+    issues_lines = []
+    for iss in issues:
+        body = (iss.get("body") or "(no body)")[:1000]
+        issues_lines.append(f"### Issue #{iss['number']}: {iss['title']}\n{body}\n")
+
+    prompt = BATCH_ORCHESTRATE_PROMPT_TEMPLATE.format(
+        repo_name=repo_name,
+        issues_block="\n".join(issues_lines),
+        n_issues=len(issues),
+    )
+
+    cmd = ["claude", "-p", "--output-format", "text", "--model", "haiku", prompt]
+
+    if config.agent_user:
+        cmd = [
+            "sudo", "-u", config.agent_user, "--",
+            "prlimit", "--nproc=100", "--fsize=2147483648", "--",
+            *cmd,
+        ]
+        agent_env = None
+    else:
+        _sensitive_vars = {
+            "CLAUDECODE", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+            "GIT_ASKPASS", "GIT_CREDENTIALS", "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+        }
+        agent_env = {k: v for k, v in os.environ.items() if k not in _sensitive_vars}
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+        **({"env": agent_env} if agent_env is not None else {}),
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.warning("Batch orchestration timed out")
+        return None
+
+    output = stdout.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        log.warning("Batch orchestration failed (exit %d): %s", proc.returncode, stderr.decode(errors="replace")[:200])
+        return None
+
+    # Strip markdown fences if present
+    cleaned = output
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        # Remove first and last fence lines
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines)
+
+    try:
+        result = json.loads(cleaned)
+    except json.JSONDecodeError:
+        log.warning("Batch orchestration returned invalid JSON: %s", cleaned[:300])
+        return None
+
+    if not isinstance(result, list):
+        log.warning("Batch orchestration returned non-list: %s", type(result))
+        return None
+
+    # Validate entries
+    issue_numbers = {iss["number"] for iss in issues}
+    valid_models = {"sonnet", "opus"}
+    validated = []
+
+    for entry in result:
+        num = entry.get("issue_number")
+        if num not in issue_numbers:
+            continue
+        model = entry.get("model", config.default_model)
+        if model not in valid_models:
+            model = config.default_model
+        priority = entry.get("priority", 100)
+        if not isinstance(priority, int):
+            priority = 100
+        depends_on = entry.get("depends_on")
+        if depends_on is not None and depends_on not in issue_numbers:
+            depends_on = None
+        reason = entry.get("reason", "")
+        validated.append({
+            "issue_number": num,
+            "model": model,
+            "priority": priority,
+            "depends_on": depends_on,
+            "reason": str(reason)[:200],
+        })
+
+    # Fill in any issues the orchestrator omitted
+    seen_numbers = {e["issue_number"] for e in validated}
+    for iss in issues:
+        if iss["number"] not in seen_numbers:
+            validated.append({
+                "issue_number": iss["number"],
+                "model": config.default_model,
+                "priority": 100,
+                "depends_on": None,
+                "reason": "omitted by orchestrator, using defaults",
+            })
+
+    return validated
+
+
 async def sync_agent_credentials(config: Config):
     """Copy admin's Claude credentials to agent user if they're newer."""
     if not config.agent_user:
@@ -789,6 +939,10 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 completed_at=now,
             )
             await db.add_log(task_id, f"Agent failed (exit {exit_code})", level="error")
+            # Cascade failure to dependent tasks
+            cascaded = await db.handle_dependency_failure(task_id)
+            if cascaded:
+                log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)
             return
 
         # Build verification loop
@@ -813,6 +967,9 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                         f"Verify failed after {config.max_verify_retries} retries, giving up",
                         level="error",
                     )
+                    cascaded = await db.handle_dependency_failure(task_id)
+                    if cascaded:
+                        log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)
                     return
 
                 # Re-run agent with verify failure context
@@ -839,6 +996,9 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                         completed_at=now,
                     )
                     await db.add_log(task_id, f"Verify fix agent failed (exit {exit_code})", level="error")
+                    cascaded = await db.handle_dependency_failure(task_id)
+                    if cascaded:
+                        log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)
                     return
 
         # Create PR
@@ -906,3 +1066,6 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 completed_at=now,
             )
             await db.add_log(task_id, f"Fatal error: {e}", level="error")
+            cascaded = await db.handle_dependency_failure(task_id)
+            if cascaded:
+                log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)

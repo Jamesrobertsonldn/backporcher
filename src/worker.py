@@ -7,7 +7,7 @@ import signal
 
 from .config import Config, load_config
 from .db import Database
-from .dispatcher import dispatch_task, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
+from .dispatcher import dispatch_task, orchestrate_batch, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
 from .github import (
     close_issue, close_pr, comment_on_issue, comment_on_pr,
     extract_pr_number_from_url, find_new_issues,
@@ -52,7 +52,7 @@ class WorkerDaemon:
     # --- Loop 1: Issue Poller ---
 
     async def _issue_poller_loop(self):
-        """Poll GitHub for new issues labeled 'voltron'."""
+        """Poll GitHub for new issues labeled 'voltron'. Batches per repo for orchestration."""
         allowed_users = set(self.config.allowed_github_users)
 
         while self._running:
@@ -62,51 +62,138 @@ class WorkerDaemon:
                     repo_full = repo_full_name_from_url(repo["github_url"])
                     issues = await find_new_issues(repo_full, allowed_users)
 
+                    # Filter to genuinely new issues (dedup)
+                    new_issues = []
                     for issue in issues:
-                        # Dedup: check if we already have a task for this issue
                         existing = await self.db.get_task_by_issue(repo["id"], issue.number)
-                        if existing:
-                            continue
+                        if not existing:
+                            new_issues.append(issue)
 
-                        # Build prompt from issue title + body
-                        prompt = issue.title
-                        if issue.body and issue.body.strip():
-                            prompt = f"{issue.title}\n\n{issue.body}"
+                    if not new_issues:
+                        continue
 
-                        # Determine model: opus label = manual override, else triage
-                        if "opus" in issue.labels:
-                            model = "opus"
-                            triage_reason = "opus label (manual override)"
-                        else:
-                            model, triage_reason = await triage_issue(
-                                issue.title, issue.body, self.config,
-                            )
+                    # Separate opus-labeled issues (manual override, no orchestration)
+                    opus_issues = [i for i in new_issues if "opus" in i.labels]
+                    normal_issues = [i for i in new_issues if "opus" not in i.labels]
 
-                        task_id = await self.db.create_task_from_issue(
-                            repo["id"], prompt, model,
-                            issue.number, issue.url,
-                        )
-                        await self.db.add_log(
-                            task_id,
-                            f"Created from issue #{issue.number}: {issue.title[:80]}",
-                        )
-                        await self.db.add_log(
-                            task_id,
-                            f"Triage: model={model} — {triage_reason[:200]}",
+                    # Process opus-labeled issues directly
+                    for issue in opus_issues:
+                        await self._create_task_for_issue(
+                            repo, repo_full, issue, "opus", "opus label (manual override)",
                         )
 
-                        log.info(
-                            "Issue #%d -> Task #%d: %s",
-                            issue.number, task_id, issue.title[:60],
+                    # Normal issues: single = triage, 2+ = batch orchestrate
+                    if len(normal_issues) == 1:
+                        issue = normal_issues[0]
+                        model, triage_reason = await triage_issue(
+                            issue.title, issue.body, self.config,
                         )
-
-                        # Claim on GitHub AFTER task creation succeeds
-                        await claim_issue(repo_full, issue.number)
+                        await self._create_task_for_issue(
+                            repo, repo_full, issue, model, triage_reason,
+                        )
+                    elif len(normal_issues) >= 2:
+                        await self._batch_create_tasks(
+                            repo, repo_full, normal_issues,
+                        )
 
             except Exception:
                 log.exception("Error in issue poller loop")
 
             await asyncio.sleep(self.config.poll_interval_seconds)
+
+    async def _create_task_for_issue(
+        self, repo: dict, repo_full: str, issue, model: str, reason: str,
+        priority: int = 100, depends_on_task_id: int | None = None,
+    ):
+        """Create a single task from an issue and claim it on GitHub."""
+        prompt = issue.title
+        if issue.body and issue.body.strip():
+            prompt = f"{issue.title}\n\n{issue.body}"
+
+        task_id = await self.db.create_task_from_issue(
+            repo["id"], prompt, model,
+            issue.number, issue.url,
+            priority=priority,
+            depends_on_task_id=depends_on_task_id,
+        )
+        await self.db.add_log(
+            task_id,
+            f"Created from issue #{issue.number}: {issue.title[:80]}",
+        )
+        dep_info = f", depends_on=task#{depends_on_task_id}" if depends_on_task_id else ""
+        await self.db.add_log(
+            task_id,
+            f"Triage: model={model}, priority={priority}{dep_info} — {reason[:200]}",
+        )
+        log.info(
+            "Issue #%d -> Task #%d (pri=%d): %s",
+            issue.number, task_id, priority, issue.title[:60],
+        )
+        await claim_issue(repo_full, issue.number)
+        return task_id
+
+    async def _batch_create_tasks(
+        self, repo: dict, repo_full: str, issues: list,
+    ):
+        """Batch-orchestrate multiple issues and create tasks with dependencies."""
+        issue_dicts = [
+            {"number": i.number, "title": i.title, "body": i.body}
+            for i in issues
+        ]
+        log.info(
+            "Batch orchestrating %d issues for %s",
+            len(issues), repo["name"],
+        )
+
+        plan = await orchestrate_batch(issue_dicts, repo["name"], self.config)
+
+        if plan is None:
+            # Fallback: triage each individually
+            log.warning("Batch orchestration failed, falling back to individual triage")
+            for issue in issues:
+                model, reason = await triage_issue(
+                    issue.title, issue.body, self.config,
+                )
+                await self._create_task_for_issue(
+                    repo, repo_full, issue, model, reason,
+                )
+            return
+
+        # Build issue_number -> issue object lookup
+        issue_by_number = {i.number: i for i in issues}
+
+        # Two-pass creation: first create all tasks, then set dependencies
+        # Pass 1: create tasks without dependencies
+        issue_to_task_id: dict[int, int] = {}
+        for entry in sorted(plan, key=lambda e: e["priority"]):
+            issue = issue_by_number.get(entry["issue_number"])
+            if not issue:
+                continue
+            task_id = await self._create_task_for_issue(
+                repo, repo_full, issue,
+                model=entry["model"],
+                reason=entry["reason"],
+                priority=entry["priority"],
+            )
+            issue_to_task_id[entry["issue_number"]] = task_id
+
+        # Pass 2: set depends_on_task_id where needed
+        for entry in plan:
+            dep_issue = entry.get("depends_on")
+            if dep_issue is None:
+                continue
+            task_id = issue_to_task_id.get(entry["issue_number"])
+            dep_task_id = issue_to_task_id.get(dep_issue)
+            if task_id and dep_task_id:
+                await self.db.update_task(task_id, depends_on_task_id=dep_task_id)
+                await self.db.add_log(
+                    task_id,
+                    f"Dependency set: blocked by task #{dep_task_id} (issue #{dep_issue})",
+                )
+                log.info(
+                    "Task #%d depends on task #%d (issue #%d -> #%d)",
+                    task_id, dep_task_id, entry["issue_number"], dep_issue,
+                )
 
     # --- Loop 2: Task Executor ---
 
