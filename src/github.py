@@ -67,6 +67,52 @@ def extract_pr_number_from_url(pr_url: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+REQUIRED_LABELS = {
+    "voltron-in-progress": ("FBCA04", "Voltron agent working"),
+    "voltron-done": ("0075CA", "Voltron completed"),
+    "voltron-failed": ("D93F0B", "Voltron agent failed"),
+}
+
+# Track which repos we've already ensured labels for (per-process)
+_labels_ensured: set[str] = set()
+
+
+async def ensure_labels(repo_full_name: str) -> None:
+    """Create required Voltron labels if they don't exist on the repo."""
+    if repo_full_name in _labels_ensured:
+        return
+
+    rc, out, _ = await _run_gh(
+        "label", "list",
+        "--repo", repo_full_name,
+        "--json", "name",
+        "--limit", "100",
+    )
+    if rc != 0:
+        log.warning("Failed to list labels for %s, skipping ensure", repo_full_name)
+        return
+
+    try:
+        existing = {lb["name"] for lb in json.loads(out)}
+    except (json.JSONDecodeError, KeyError):
+        return
+
+    for label, (color, desc) in REQUIRED_LABELS.items():
+        if label not in existing:
+            rc, _, err = await _run_gh(
+                "label", "create", label,
+                "--repo", repo_full_name,
+                "--color", color,
+                "--description", desc,
+            )
+            if rc == 0:
+                log.info("Created label '%s' on %s", label, repo_full_name)
+            else:
+                log.warning("Failed to create label '%s' on %s: %s", label, repo_full_name, err.strip())
+
+    _labels_ensured.add(repo_full_name)
+
+
 async def find_new_issues(
     repo_full_name: str, allowed_users: set[str],
 ) -> list[GitHubIssue]:

@@ -7,10 +7,10 @@ import signal
 
 from .config import Config, load_config
 from .db import Database
-from .dispatcher import dispatch_task, orchestrate_batch, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
+from .dispatcher import _mark_issue_failed, _pick_retry_model, cleanup_task_artifacts, dispatch_task, orchestrate_batch, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
 from .github import (
     close_issue, close_pr, comment_on_issue, comment_on_pr,
-    extract_pr_number_from_url, find_new_issues,
+    ensure_labels, extract_pr_number_from_url, find_new_issues,
     claim_issue, get_ci_failure_logs, get_pr_ci_status,
     is_pr_conflicting, merge_pr,
     repo_full_name_from_url, update_issue_labels,
@@ -22,6 +22,10 @@ log = logging.getLogger("voltron.worker")
 EXECUTOR_POLL_SECONDS = 5
 # Coordinator review loop interval
 COORDINATOR_POLL_SECONDS = 15
+# Artifact cleanup loop interval
+CLEANUP_POLL_SECONDS = 300  # 5 minutes
+# Minimum age before cleaning up terminal task artifacts
+CLEANUP_MIN_AGE_MINUTES = 10
 
 
 class WorkerDaemon:
@@ -33,7 +37,7 @@ class WorkerDaemon:
         self._tasks: set[asyncio.Task] = set()
 
     async def run(self):
-        """Launch 4 concurrent loops."""
+        """Launch concurrent loops (4 core + optional dashboard)."""
         self._running = True
         log.info(
             "Worker daemon started (max_concurrency=%d, issue_poll=%ds, ci_poll=%ds, coordinator_model=%s)",
@@ -43,12 +47,22 @@ class WorkerDaemon:
             self.config.coordinator_model,
         )
 
-        await asyncio.gather(
+        loops = [
             self._issue_poller_loop(),
             self._task_executor_loop(),
             self._coordinator_review_loop(),
             self._ci_monitor_loop(),
-        )
+            self._cleanup_loop(),
+        ]
+
+        if self.config.dashboard_password:
+            from .dashboard import start_dashboard
+            loops.append(start_dashboard(self.db, self.config))
+            log.info("Dashboard enabled on port %d", self.config.dashboard_port)
+        else:
+            log.info("Dashboard disabled (no VOLTRON_DASHBOARD_PASSWORD set)")
+
+        await asyncio.gather(*loops)
 
     # --- Loop 1: Issue Poller ---
 
@@ -61,6 +75,7 @@ class WorkerDaemon:
                 repos = await self.db.list_repos()
                 for repo in repos:
                     repo_full = repo_full_name_from_url(repo["github_url"])
+                    await ensure_labels(repo_full)
                     issues = await find_new_issues(repo_full, allowed_users)
 
                     # Filter to genuinely new issues (dedup)
@@ -307,35 +322,97 @@ class WorkerDaemon:
                             f"**Coordinator Review: APPROVED**\n\n{short_summary}",
                         )
                     else:
-                        # Reject: close PR, fail task
+                        # Reject: check retry budget before permanent failure
                         log.warning("Task #%d: coordinator REJECTED", task_id)
                         await self.db.add_log(task_id, f"Coordinator rejected PR: {summary[:200]}", level="warn")
 
-                        reject_comment = (
-                            f"**Coordinator Review: REJECTED**\n\n{summary[:1500]}\n\n"
-                            f"PR closed by Voltron coordinator."
-                        )
-                        await close_pr(repo_full, pr_number, comment=reject_comment)
-                        await self.db.update_task(task_id, status="failed", error_message=f"Coordinator rejected: {summary[:500]}")
+                        retry_count = task.get("retry_count", 0)
 
-                        # Cascade failure to dependent tasks
-                        cascaded = await self.db.handle_dependency_failure(task_id)
-                        if cascaded:
-                            log.info("Task #%d rejection cascaded to tasks: %s", task_id, cascaded)
+                        if retry_count < self.config.max_task_retries:
+                            # Retry with feedback + model escalation
+                            new_count = retry_count + 1
+                            new_model = _pick_retry_model(task.get("model", "sonnet"), new_count)
 
-                        # Update issue labels
-                        issue_num = task.get("github_issue_number")
-                        if issue_num:
-                            await update_issue_labels(
-                                repo_full, issue_num,
-                                add=["voltron-failed"],
-                                remove=["voltron-in-progress"],
+                            # Close the rejected PR
+                            reject_comment = (
+                                f"**Coordinator Review: REJECTED**\n\n{summary[:1500]}\n\n"
+                                f"Retrying with {new_model} model (attempt {new_count}/{self.config.max_task_retries})."
                             )
-                            await comment_on_issue(
-                                repo_full, issue_num,
-                                f"PR was rejected by coordinator review:\n\n{summary[:500]}\n\n"
-                                f"Re-add the `voltron` label to retry.",
+                            await close_pr(repo_full, pr_number, comment=reject_comment)
+
+                            # Inject rejection context into prompt
+                            rejection_context = (
+                                f"\n\n---\n"
+                                f"IMPORTANT: A previous attempt at this task was rejected during code review.\n"
+                                f"Reviewer feedback:\n\n{summary[:2000]}\n\n"
+                                f"Address ALL the reviewer's concerns in your implementation."
                             )
+                            original_prompt = task["prompt"]
+                            # Strip any previous rejection context (avoid stacking)
+                            if "\n\n---\nIMPORTANT: A previous attempt" in original_prompt:
+                                original_prompt = original_prompt.split("\n\n---\nIMPORTANT: A previous attempt")[0]
+                            new_prompt = original_prompt + rejection_context
+
+                            await self.db.update_task(
+                                task_id,
+                                status="queued",
+                                started_at=None,
+                                branch_name=None,
+                                worktree_path=None,
+                                pr_url=None,
+                                pr_number=None,
+                                review_summary=None,
+                                retry_count=new_count,
+                                model=new_model,
+                                prompt=new_prompt,
+                            )
+                            await self.db.add_log(
+                                task_id,
+                                f"Coordinator rejected, retry {new_count}/{self.config.max_task_retries} (model={new_model})",
+                                level="warn",
+                            )
+                            log.info(
+                                "Task #%d: coordinator rejected, retry %d/%d (model=%s)",
+                                task_id, new_count, self.config.max_task_retries, new_model,
+                            )
+
+                            issue_num = task.get("github_issue_number")
+                            if issue_num:
+                                await comment_on_issue(
+                                    repo_full, issue_num,
+                                    f"PR rejected by coordinator. Retrying with {new_model} model "
+                                    f"({new_count}/{self.config.max_task_retries})...\n\n"
+                                    f"Feedback: {summary[:300]}",
+                                )
+                        else:
+                            # Max retries exhausted — permanent failure
+                            reject_comment = (
+                                f"**Coordinator Review: REJECTED**\n\n{summary[:1500]}\n\n"
+                                f"PR closed by Voltron coordinator (retries exhausted)."
+                            )
+                            await close_pr(repo_full, pr_number, comment=reject_comment)
+                            await self.db.update_task(
+                                task_id, status="failed",
+                                error_message=f"Coordinator rejected (retries exhausted): {summary[:500]}",
+                            )
+
+                            cascaded = await self.db.handle_dependency_failure(task_id)
+                            if cascaded:
+                                log.info("Task #%d rejection cascaded to tasks: %s", task_id, cascaded)
+
+                            issue_num = task.get("github_issue_number")
+                            if issue_num:
+                                await update_issue_labels(
+                                    repo_full, issue_num,
+                                    add=["voltron-failed"],
+                                    remove=["voltron-in-progress"],
+                                )
+                                await comment_on_issue(
+                                    repo_full, issue_num,
+                                    f"PR was rejected by coordinator review (retries exhausted):\n\n{summary[:500]}\n\n"
+                                    f"Re-add the `voltron` label to retry.",
+                                )
+                            await cleanup_task_artifacts(task, self.db)
 
             except Exception:
                 log.exception("Error in coordinator review loop")
@@ -438,6 +515,7 @@ class WorkerDaemon:
                         "CI passed. PR has been merged. Closing issue.",
                     )
                     await close_issue(repo_full, issue_num)
+                await cleanup_task_artifacts(task, self.db)
                 return
 
             # Merge failed — check if it's a conflict
@@ -465,8 +543,26 @@ class WorkerDaemon:
                     completed_at=None,
                 )
             else:
-                await self.db.add_log(task_id, f"Failed to merge PR #{pr_number}", level="warn")
-                log.warning("Task #%d: merge failed for PR #%d", task_id, pr_number)
+                await self.db.update_task(
+                    task_id, status="failed",
+                    error_message=f"Merge failed for PR #{pr_number} (no conflict detected)",
+                )
+                await self.db.add_log(task_id, f"Failed to merge PR #{pr_number} (no conflict)", level="error")
+                log.warning("Task #%d: merge failed for PR #%d (no conflict), marking failed", task_id, pr_number)
+
+                issue_num = task.get("github_issue_number")
+                if issue_num:
+                    await update_issue_labels(
+                        repo_full, issue_num,
+                        add=["voltron-failed"],
+                        remove=["voltron-in-progress"],
+                    )
+                    await comment_on_issue(
+                        repo_full, issue_num,
+                        f"Merge failed for PR #{pr_number} (reason unknown, not a conflict).\n\n"
+                        f"Re-add the `voltron` label to retry.",
+                    )
+                await cleanup_task_artifacts(task, self.db)
 
     async def _handle_ci_failure(self, task: dict, repo_full: str, ci):
         """CI failed — retry or mark failed."""
@@ -515,6 +611,7 @@ class WorkerDaemon:
                     f"Failed checks: {', '.join(ci.failed_checks[:5])}\n\n"
                     f"Marking as failed. Re-add the `voltron` label to retry.",
                 )
+            await cleanup_task_artifacts(task, self.db)
 
     async def _process_retry(self, task: dict):
         """Fetch CI logs and re-run agent with context."""
@@ -522,6 +619,8 @@ class WorkerDaemon:
         branch = task.get("branch_name")
         if not branch:
             await self.db.update_task(task_id, status="failed", error_message="No branch for retry")
+            await _mark_issue_failed(task, self.db, "CI retry failed: no branch available.")
+            await cleanup_task_artifacts(task, self.db)
             return
 
         repo_full = repo_full_name_from_url(task["github_url"])
@@ -538,6 +637,39 @@ class WorkerDaemon:
                 error_message=f"Retry error: {str(e)[:500]}",
             )
             await self.db.add_log(task_id, f"Retry error: {e}", level="error")
+            await _mark_issue_failed(
+                task, self.db,
+                f"CI retry failed with error: {str(e)[:300]}",
+            )
+            await cleanup_task_artifacts(task, self.db)
+
+    # --- Loop 5: Periodic Cleanup ---
+
+    async def _cleanup_loop(self):
+        """Periodically clean up worktrees and remote branches for terminal tasks."""
+        # Wait a bit before first run to let startup settle
+        await asyncio.sleep(60)
+
+        while self._running:
+            try:
+                tasks = await self.db.list_cleanable_tasks(
+                    min_age_minutes=CLEANUP_MIN_AGE_MINUTES,
+                )
+                if tasks:
+                    log.info("Cleanup loop: found %d tasks to clean", len(tasks))
+                for task in tasks:
+                    if not self._running:
+                        break
+                    try:
+                        await cleanup_task_artifacts(task, self.db)
+                    except Exception:
+                        log.exception(
+                            "Cleanup failed for task #%d", task["id"],
+                        )
+            except Exception:
+                log.exception("Error in cleanup loop")
+
+            await asyncio.sleep(CLEANUP_POLL_SECONDS)
 
     async def shutdown(self):
         """Graceful shutdown: stop polling, wait for active tasks."""

@@ -21,6 +21,31 @@ from .github import (
 
 log = logging.getLogger("voltron.dispatcher")
 
+
+async def _mark_issue_failed(task: dict, db: Database, reason: str):
+    """Update GitHub labels on the source issue when a task permanently fails.
+
+    Moves from voltron-in-progress → voltron-failed and posts a comment.
+    No-op if the task didn't originate from a GitHub issue.
+    """
+    issue_num = task.get("github_issue_number")
+    if not issue_num:
+        return
+    repo = await db.get_repo(task["repo_id"])
+    if not repo:
+        return
+    repo_full = repo_full_name_from_url(repo["github_url"])
+    await update_issue_labels(
+        repo_full, issue_num,
+        add=["voltron-failed"],
+        remove=["voltron-in-progress"],
+    )
+    await comment_on_issue(
+        repo_full, issue_num,
+        f"{reason}\n\nRe-add the `voltron` label to retry.",
+    )
+
+
 # Per-repo locks to serialize git operations (fetch/worktree) for the same repo
 _repo_locks: dict[int, asyncio.Lock] = {}
 
@@ -171,6 +196,10 @@ async def setup_worktree(
     await run_cmd("git", "config", "user.name", "Voltron", cwd=worktree_path)
     await run_cmd("git", "config", "user.email", "voltron@dispatch.local", cwd=worktree_path)
 
+    # Ensure worktree files are group-writable so agent user can modify them.
+    # core.sharedRepository=group only affects new git objects, not checked-out files.
+    await run_cmd("chmod", "-R", "g+w", str(worktree_path))
+
     return worktree_path
 
 
@@ -203,7 +232,7 @@ async def run_agent(
         cmd = [
             "sudo", "-u", config.agent_user, "--",
             "prlimit",
-            "--nproc=100",        # max 100 processes
+            "--nproc=500",        # max 500 processes
             "--fsize=2147483648",  # 2 GB max file size
             "--",
             *cmd,
@@ -506,7 +535,7 @@ async def run_review(
     if config.agent_user:
         cmd = [
             "sudo", "-u", config.agent_user, "--",
-            "prlimit", "--nproc=100", "--fsize=2147483648", "--",
+            "prlimit", "--nproc=500", "--fsize=2147483648", "--",
             *cmd,
         ]
         agent_env = None
@@ -572,6 +601,60 @@ async def cleanup_worktree(repo_path: Path, task_id: int) -> bool:
     return rc == 0
 
 
+async def cleanup_task_artifacts(task: dict, db: Database):
+    """Delete worktree and remote branch for a finished task.
+
+    Safe to call multiple times (idempotent). Logs but doesn't raise on
+    partial failures — cleanup is best-effort.
+    """
+    task_id = task["id"]
+    repo = await db.get_repo(task["repo_id"])
+    if not repo:
+        return
+
+    repo_path = Path(repo["local_path"])
+    cleaned_any = False
+
+    # 1. Remove worktree
+    worktree = task.get("worktree_path")
+    if worktree and Path(worktree).exists():
+        rc, _, err = await run_cmd(
+            "git", "worktree", "remove", "--force",
+            worktree, cwd=repo_path,
+        )
+        if rc == 0:
+            log.info("Task #%d: removed worktree %s", task_id, worktree)
+            cleaned_any = True
+        else:
+            log.warning("Task #%d: worktree remove failed: %s", task_id, err.strip())
+            # Force-remove directory if git command failed
+            if Path(worktree).exists():
+                shutil.rmtree(worktree, ignore_errors=True)
+                cleaned_any = True
+
+    # 2. Prune stale worktree refs
+    if cleaned_any:
+        await run_cmd("git", "worktree", "prune", cwd=repo_path)
+
+    # 3. Delete remote branch
+    branch = task.get("branch_name")
+    if branch:
+        rc, _, _ = await run_cmd(
+            "git", "push", "origin", "--delete", branch,
+            cwd=repo_path, timeout=30,
+        )
+        if rc == 0:
+            log.info("Task #%d: deleted remote branch %s", task_id, branch)
+
+    # 4. Clear paths in DB so we don't try again
+    if cleaned_any or branch:
+        await db.update_task(
+            task_id,
+            worktree_path=None,
+            branch_name=None,
+        )
+
+
 async def ensure_repo_permissions(repo_path: Path, config: Config):
     """Set core.sharedRepository=group if agent_user is configured."""
     if not config.agent_user:
@@ -624,6 +707,11 @@ async def retry_with_ci_context(
             error_message=f"Retry agent exited with code {exit_code}",
             completed_at=now,
         )
+        await _mark_issue_failed(
+            task, db,
+            f"CI retry agent failed with exit code {exit_code}.",
+        )
+        await cleanup_task_artifacts(task, db)
         return
 
     # Push fixes (force-with-lease since we're updating the same branch)
@@ -679,7 +767,7 @@ async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]
     if config.agent_user:
         cmd = [
             "sudo", "-u", config.agent_user, "--",
-            "prlimit", "--nproc=100", "--fsize=2147483648", "--",
+            "prlimit", "--nproc=500", "--fsize=2147483648", "--",
             *cmd,
         ]
         agent_env = None
@@ -781,7 +869,7 @@ async def orchestrate_batch(
     if config.agent_user:
         cmd = [
             "sudo", "-u", config.agent_user, "--",
-            "prlimit", "--nproc=100", "--fsize=2147483648", "--",
+            "prlimit", "--nproc=500", "--fsize=2147483648", "--",
             *cmd,
         ]
         agent_env = None
@@ -907,6 +995,13 @@ async def sync_agent_credentials(config: Config):
             log.warning("Failed to sync credentials: %s", err.strip())
 
 
+def _pick_retry_model(current_model: str, retry_count: int) -> str:
+    """Escalate model on retry. Sonnet -> opus after first attempt."""
+    if current_model == "sonnet" and retry_count >= 1:
+        return "opus"
+    return current_model
+
+
 async def dispatch_task(task: dict, config: Config, db: Database):
     """Full lifecycle: fetch → worktree → agent → PR."""
     task_id = task["id"]
@@ -943,15 +1038,49 @@ async def dispatch_task(task: dict, config: Config, db: Database):
         )
 
         if exit_code != 0:
+            retry_count = task.get("retry_count", 0)
+            max_retries = config.max_task_retries
+
+            if retry_count < max_retries:
+                new_count = retry_count + 1
+                new_model = _pick_retry_model(task["model"], new_count)
+                await db.update_task(
+                    task_id,
+                    status="queued",
+                    error_message=None,
+                    started_at=None,
+                    branch_name=None,
+                    worktree_path=None,
+                    retry_count=new_count,
+                    model=new_model,
+                )
+                reason = f"exit {exit_code}"
+                await db.add_log(
+                    task_id,
+                    f"Agent failed ({reason}), retry {new_count}/{max_retries} "
+                    f"(model={new_model})",
+                    level="warn",
+                )
+                log.info(
+                    "Task %d: agent failed (%s), retry %d/%d (model=%s)",
+                    task_id, reason, new_count, max_retries, new_model,
+                )
+                return
+
+            # Max retries exhausted — permanent failure
             now = datetime.now(timezone.utc).isoformat()
             await db.update_task(
                 task_id,
                 status="failed",
-                error_message=f"Agent exited with code {exit_code}",
+                error_message=f"Agent exited with code {exit_code} (retries exhausted)",
                 completed_at=now,
             )
-            await db.add_log(task_id, f"Agent failed (exit {exit_code})", level="error")
-            # Cascade failure to dependent tasks
+            await db.add_log(task_id, f"Agent failed (exit {exit_code}), retries exhausted", level="error")
+            await _mark_issue_failed(
+                task, db,
+                f"Agent failed with exit code {exit_code} (retries exhausted).",
+            )
+            await cleanup_task_artifacts(task, db)
             cascaded = await db.handle_dependency_failure(task_id)
             if cascaded:
                 log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)
@@ -979,6 +1108,11 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                         f"Verify failed after {config.max_verify_retries} retries, giving up",
                         level="error",
                     )
+                    await _mark_issue_failed(
+                        task, db,
+                        f"Build verification failed after {config.max_verify_retries} fix attempts.",
+                    )
+                    await cleanup_task_artifacts(task, db)
                     cascaded = await db.handle_dependency_failure(task_id)
                     if cascaded:
                         log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)
@@ -1001,17 +1135,10 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 fix_task["prompt"] = fix_prompt
                 exit_code, summary = await run_agent(fix_task, worktree_path, config, db)
                 if exit_code != 0:
-                    now = datetime.now(timezone.utc).isoformat()
-                    await db.update_task(
-                        task_id, status="failed",
-                        error_message=f"Verify fix agent exited with code {exit_code}",
-                        completed_at=now,
+                    # Let the outer exception handler deal with retry/escalation
+                    raise RuntimeError(
+                        f"Verify fix agent exited with code {exit_code}"
                     )
-                    await db.add_log(task_id, f"Verify fix agent failed (exit {exit_code})", level="error")
-                    cascaded = await db.handle_dependency_failure(task_id)
-                    if cascaded:
-                        log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)
-                    return
 
         # Create PR
         await db.add_log(task_id, "Creating pull request...")
@@ -1039,22 +1166,17 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 task_id, status="completed", completed_at=now,
             )
             await db.add_log(task_id, "Completed (no changes)")
+            await cleanup_task_artifacts(task, db)
 
     except Exception as e:
         log.exception("Task %d failed", task_id)
         err_str = str(e)[:2000]
         now = datetime.now(timezone.utc).isoformat()
 
-        # Auto-retry on transient infrastructure failures
-        transient_patterns = [
-            "authentication_error", "EACCES", "permission denied",
-            "branch named", "already exists", "No such file or directory",
-        ]
         retry_count = task.get("retry_count", 0)
-        is_transient = any(p.lower() in err_str.lower() for p in transient_patterns)
-
-        if is_transient and retry_count < 2:
+        if retry_count < config.max_task_retries:
             new_count = retry_count + 1
+            new_model = _pick_retry_model(task.get("model", "sonnet"), new_count)
             await db.update_task(
                 task_id,
                 status="queued",
@@ -1063,13 +1185,18 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 branch_name=None,
                 worktree_path=None,
                 retry_count=new_count,
+                model=new_model,
             )
             await db.add_log(
                 task_id,
-                f"Transient error, auto-retry {new_count}/2: {err_str[:200]}",
+                f"Error, retry {new_count}/{config.max_task_retries} "
+                f"(model={new_model}): {err_str[:200]}",
                 level="warn",
             )
-            log.info("Task %d: transient error, auto-retry %d/2", task_id, new_count)
+            log.info(
+                "Task %d: error, retry %d/%d (model=%s)",
+                task_id, new_count, config.max_task_retries, new_model,
+            )
         else:
             await db.update_task(
                 task_id,
@@ -1077,7 +1204,12 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 error_message=err_str,
                 completed_at=now,
             )
-            await db.add_log(task_id, f"Fatal error: {e}", level="error")
+            await db.add_log(task_id, f"Fatal error (retries exhausted): {e}", level="error")
+            await _mark_issue_failed(
+                task, db,
+                f"Task failed with error: {err_str[:300]}",
+            )
+            await cleanup_task_artifacts(task, db)
             cascaded = await db.handle_dependency_failure(task_id)
             if cascaded:
                 log.info("Task #%d failure cascaded to tasks: %s", task_id, cascaded)

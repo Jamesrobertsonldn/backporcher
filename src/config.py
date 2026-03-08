@@ -36,6 +36,13 @@ class Config:
     # Build verification
     max_verify_retries: int = 2
 
+    # Smart retry (shared budget across all failure modes)
+    max_task_retries: int = 3
+
+    # Dashboard
+    dashboard_port: int = 8080
+    dashboard_password: str | None = None
+
 
 def load_config() -> Config:
     """Load config from environment variables."""
@@ -72,4 +79,7 @@ def load_config() -> Config:
         allowed_github_users=allowed_users,
         coordinator_model=os.environ.get("VOLTRON_COORDINATOR_MODEL", "sonnet"),
         max_verify_retries=int(os.environ.get("VOLTRON_MAX_VERIFY_RETRIES", "2")),
+        max_task_retries=int(os.environ.get("VOLTRON_MAX_TASK_RETRIES", "3")),
+        dashboard_port=int(os.environ.get("VOLTRON_DASHBOARD_PORT", "8080")),
+        dashboard_password=os.environ.get("VOLTRON_DASHBOARD_PASSWORD") or None,
     )

@@ -21,6 +21,8 @@ Environment=VOLTRON_GITHUB_OWNER=montenegronyc
 Environment=VOLTRON_CI_CHECK_INTERVAL=60
 Environment=VOLTRON_MAX_CI_RETRIES=3
 Environment=VOLTRON_ALLOWED_USERS=montenegronyc
+Environment=VOLTRON_DASHBOARD_PORT=8888
+Environment=VOLTRON_DASHBOARD_PASSWORD=REDACTED_CHANGE_ME
 Environment=RUSTUP_HOME=/home/administrator/.rustup
 Environment=CARGO_HOME=/home/administrator/.cargo
 Environment=PATH=/home/administrator/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

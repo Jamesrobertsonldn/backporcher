@@ -454,6 +454,19 @@ class Database:
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
+    async def list_cleanable_tasks(self, min_age_minutes: int = 10) -> list[dict]:
+        """Find terminal tasks with worktrees or branches that are old enough to clean up."""
+        async with self.db.execute(
+            "SELECT t.*, r.name as repo_name, r.github_url FROM tasks t "
+            "JOIN repos r ON t.repo_id = r.id "
+            "WHERE t.status IN ('completed', 'failed', 'cancelled') "
+            "  AND (t.worktree_path IS NOT NULL OR t.branch_name IS NOT NULL) "
+            "  AND t.completed_at IS NOT NULL "
+            "  AND t.completed_at < datetime('now', ?)",
+            (f"-{min_age_minutes} minutes",),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
     async def claim_next_queued(self) -> dict | None:
         """Atomically claim the highest-priority queued task whose dependencies are met."""
         async with self._write_lock:
@@ -495,7 +508,7 @@ class Database:
         allowed = {
             "status", "branch_name", "worktree_path", "pr_url",
             "agent_pid", "exit_code", "error_message", "output_summary",
-            "review_summary",
+            "review_summary", "prompt", "model",
             "started_at", "completed_at",
             "pr_number", "github_issue_number", "github_issue_url", "retry_count",
             "priority", "depends_on_task_id",
@@ -710,7 +723,7 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
         allowed = {
             "status", "branch_name", "worktree_path", "pr_url",
             "agent_pid", "exit_code", "error_message", "output_summary",
-            "review_summary",
+            "review_summary", "prompt", "model",
             "started_at", "completed_at",
             "pr_number", "github_issue_number", "github_issue_url", "retry_count",
             "priority", "depends_on_task_id",

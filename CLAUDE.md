@@ -20,14 +20,16 @@ GitHub Issue (label: voltron)
                         → Close issue (label: voltron-done)
 ```
 
-## Four Concurrent Loops
+## Six Concurrent Loops
 
-The worker daemon (`src/worker.py`) runs 4 async loops via `asyncio.gather()`:
+The worker daemon (`src/worker.py`) runs up to 6 async loops via `asyncio.gather()`:
 
 1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `voltron`, deduplicates (including failed tasks), batch-orchestrates 2+ issues per repo (assigns priorities, dependencies, models via haiku), creates tasks, claims issues with `voltron-in-progress` label
 2. **Task Executor** (every 5s) — claims queued tasks (bounded by semaphore), syncs credentials, runs `claude -p` in isolated worktrees, optionally runs build verification, creates PRs. Auto-retries transient failures (auth, permissions, stale branches)
 3. **Coordinator Reviewer** (every 15s) — reviews each PR diff via `claude -p`, checks for conflicts with other open PRs, approves or rejects. Backfills missing `pr_number` from `pr_url`
 4. **CI Monitor** (every 60s) — checks CI status on approved PRs, auto-merges passing PRs (squash), auto-retries failures with CI log context, closes GitHub issues on success
+5. **Artifact Cleanup** (every 5 min) — removes worktrees and remote branches for terminal tasks older than 10 minutes
+6. **Dashboard** (optional) — aiohttp web server with HTTP Basic Auth, real-time SSE updates every 5s, dark-themed HTML UI. Only starts when `VOLTRON_DASHBOARD_PASSWORD` is set
 
 ## Task Status Flow
 
@@ -47,7 +49,8 @@ any    → cancelled (manual via CLI)
 | File | Purpose |
 |------|---------|
 | `src/cli.py` | CLI entry point: `fleet`, `status`, `cancel`, `cleanup`, `repo`, `worker` |
-| `src/worker.py` | Background daemon — 4 async loops, graceful shutdown, startup recovery, preflight checks |
+| `src/worker.py` | Background daemon — 6 async loops, graceful shutdown, startup recovery, preflight checks |
+| `src/dashboard.py` | aiohttp web dashboard: HTTP Basic Auth, SSE real-time updates, JSON API, dark-themed HTML |
 | `src/dispatcher.py` | Worktree setup, credential sync, agent execution, build verification, PR creation, coordinator review runner, CI retry, transient failure auto-retry |
 | `src/db.py` | SQLite with WAL mode, schema migrations (v1→v5), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
 | `src/config.py` | `Config` dataclass populated from environment variables |
@@ -86,6 +89,8 @@ All config via environment variables (see `src/config.py`):
 | `VOLTRON_AGENT_USER` | (none) | Sandbox user for agents (e.g. `voltron-agent`) |
 | `VOLTRON_GITHUB_OWNER` | `montenegronyc` | GitHub org/owner |
 | `VOLTRON_ALLOWED_USERS` | `montenegronyc` | Comma-separated issue author allowlist |
+| `VOLTRON_DASHBOARD_PORT` | `8888` | Dashboard web server port |
+| `VOLTRON_DASHBOARD_PASSWORD` | (none) | Dashboard password — dashboard disabled if unset |
 
 ## Security Model
 
@@ -93,7 +98,7 @@ All config via environment variables (see `src/config.py`):
 Agents run as `voltron-agent` via `sudo -u voltron-agent`. This is a restricted system user with:
 - **CAN:** Read/write worktree files, git commit/push, run build/test tools, call Anthropic API
 - **CANNOT:** Read admin's home (`~/.ssh`, `~/.claude`, gh tokens), access OpenClaw secrets, sudo, modify system files
-- Process limits enforced via `prlimit` (100 processes, 2GB file size)
+- Process limits enforced via `prlimit` (500 processes, 2GB file size)
 - Claude credentials are copied (not symlinked) to the agent user's home
 - Agent output buffer capped at 10MB to prevent memory exhaustion
 - Sensitive env vars (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, etc.) stripped from agent subprocess
@@ -118,6 +123,9 @@ Only issues created by users in `VOLTRON_ALLOWED_USERS` are picked up. Prevents 
 5. **PR number backfill** — If `pr_number` is NULL but `pr_url` exists, the coordinator extracts it automatically. Never blocks on missing data.
 6. **Startup preflight** — Verifies agent user can access repos directory and syncs credentials before entering poll loops.
 7. **Dependency failure cascade** — When a task fails, all queued tasks that depend on it (and their dependents) are automatically marked as failed.
+8. **Terminal state label sync** — All failure paths (agent, verify, CI, coordinator, exceptions) update GitHub issue labels to `voltron-failed`. No more stale `voltron-in-progress` labels on finished issues.
+9. **Automatic artifact cleanup** — Worktrees and remote branches are deleted on every terminal state (completed, failed, cancelled). A periodic cleanup loop (every 5 min) catches any stragglers older than 10 minutes.
+10. **Merge failure recovery** — When PR merge fails without a conflict, the task is marked `failed` instead of silently stalling in `ci_passed`.
 
 ## Batch Orchestration
 

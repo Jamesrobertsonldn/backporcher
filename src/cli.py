@@ -281,6 +281,59 @@ def cmd_cancel(args):
 
 # --- cleanup ---
 
+def _cleanup_single_task(task: dict, db: SyncDatabase):
+    """Clean up worktree and remote branch for a single task. Returns (worktree_removed, branch_deleted)."""
+    wt_removed = False
+    br_deleted = False
+    repo = db.get_repo_by_name(task["repo_name"])
+    if not repo:
+        return wt_removed, br_deleted
+
+    repo_path = repo["local_path"]
+
+    # Remove worktree
+    wt = task.get("worktree_path")
+    if wt and Path(wt).exists():
+        rc = subprocess.run(
+            ["git", "worktree", "remove", "--force", wt],
+            cwd=repo_path, capture_output=True,
+        )
+        if rc.returncode == 0:
+            wt_removed = True
+        else:
+            # Force-remove directory if git command failed
+            import shutil
+            shutil.rmtree(wt, ignore_errors=True)
+            wt_removed = Path(wt).exists() is False
+
+    # Prune stale worktree refs
+    if wt_removed:
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=repo_path, capture_output=True,
+        )
+
+    # Delete remote branch
+    branch = task.get("branch_name")
+    if branch:
+        rc = subprocess.run(
+            ["git", "push", "origin", "--delete", branch],
+            cwd=repo_path, capture_output=True, timeout=30,
+        )
+        if rc.returncode == 0:
+            br_deleted = True
+
+    # Clear paths in DB
+    if wt_removed or br_deleted:
+        db.update_task(
+            task["id"],
+            worktree_path=None,
+            branch_name=None,
+        )
+
+    return wt_removed, br_deleted
+
+
 def cmd_cleanup(args):
     config = load_config()
     db = get_db()
@@ -290,35 +343,32 @@ def cmd_cleanup(args):
         if not task:
             print(f"Task #{args.task_id} not found")
             sys.exit(1)
-        wt = task.get("worktree_path")
-        if wt and Path(wt).exists():
-            repo_path = Path(db.get_repo_by_name(task["repo_name"])["local_path"])
-            rc = subprocess.run(
-                ["git", "worktree", "remove", "--force", wt],
-                cwd=str(repo_path), capture_output=True,
-            )
-            if rc.returncode == 0:
-                print(f"Removed worktree for task #{task['id']}")
-            else:
-                print(f"Failed to remove worktree: {rc.stderr.decode()}")
+
+        wt_removed, br_deleted = _cleanup_single_task(task, db)
+        parts = []
+        if wt_removed:
+            parts.append("worktree")
+        if br_deleted:
+            parts.append("remote branch")
+        if parts:
+            print(f"Cleaned task #{task['id']}: removed {', '.join(parts)}")
         else:
-            print(f"No worktree found for task #{task['id']}")
+            print(f"Nothing to clean for task #{task['id']}")
     else:
-        # Clean all completed/failed/cancelled worktrees
-        removed = 0
+        # Clean all completed/failed/cancelled worktrees and branches
+        worktrees_removed = 0
+        branches_deleted = 0
         for status in ("reviewed", "ci_passed", "completed", "failed", "cancelled"):
-            tasks = db.list_tasks(status=status, limit=200)
+            tasks = db.list_tasks(status=status, limit=500)
             for t in tasks:
-                wt = t.get("worktree_path")
-                if wt and Path(wt).exists():
-                    repo = db.get_repo_by_name(t["repo_name"])
-                    if repo:
-                        subprocess.run(
-                            ["git", "worktree", "remove", "--force", wt],
-                            cwd=repo["local_path"], capture_output=True,
-                        )
-                        removed += 1
-        print(f"Cleaned up {removed} worktrees")
+                if not t.get("worktree_path") and not t.get("branch_name"):
+                    continue
+                wt, br = _cleanup_single_task(t, db)
+                if wt:
+                    worktrees_removed += 1
+                if br:
+                    branches_deleted += 1
+        print(f"Cleaned up {worktrees_removed} worktrees, {branches_deleted} remote branches")
 
     db.close()
 
