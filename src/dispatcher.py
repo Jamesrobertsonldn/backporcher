@@ -214,7 +214,14 @@ async def run_agent(
     Returns (exit_code, output_summary).
     Uses Max subscription — no --max-budget-usd flag.
     """
-    prompt = task["prompt"]
+    # Prepend non-interactive override: agents running via claude -p have no
+    # interactive user, so skip any "wait for approval" instructions from CLAUDE.md
+    prompt = (
+        "IMPORTANT: You are running non-interactively via an automated dispatcher. "
+        "Implement directly — do NOT give an approach summary or wait for approval. "
+        "Start coding immediately.\n\n"
+        + task["prompt"]
+    )
     model = task["model"]
     log_file = config.logs_dir / f"{task['id']}.jsonl"
 
@@ -359,13 +366,24 @@ async def run_agent(
 
 async def run_verify(
     worktree_path: Path, verify_command: str, task_id: int, db: Database,
+    config: Config | None = None,
 ) -> tuple[bool, str]:
     """Run repo's verify command in the worktree. Returns (passed, output)."""
     log.info("Task #%d: running verify: %s", task_id, verify_command)
     await db.add_log(task_id, f"Running verify: {verify_command}")
 
+    # Run as agent user when sandboxing is configured, so target/ dirs
+    # are owned by the same user that runs the agent
+    cmd: list[str] = ["bash", "-c", verify_command]
+    if config and config.agent_user:
+        cmd = [
+            "sudo", "-u", config.agent_user, "--",
+            "prlimit", "--nproc=500", "--fsize=2147483648", "--",
+            *cmd,
+        ]
+
     proc = await asyncio.create_subprocess_exec(
-        "bash", "-c", verify_command,
+        *cmd,
         cwd=str(worktree_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -1091,7 +1109,7 @@ async def dispatch_task(task: dict, config: Config, db: Database):
         if verify_command:
             for attempt in range(1, config.max_verify_retries + 2):  # +2: initial + retries
                 passed, verify_output = await run_verify(
-                    worktree_path, verify_command, task_id, db,
+                    worktree_path, verify_command, task_id, db, config,
                 )
                 if passed:
                     break
