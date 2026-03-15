@@ -74,7 +74,7 @@ async def _build_status(db: Database) -> dict:
     async with db.db.execute(
         "SELECT t.id, t.status, t.model, t.github_issue_number, t.started_at, "
         "t.completed_at, t.pr_url, t.pr_number, t.priority, t.depends_on_task_id, "
-        "t.retry_count, t.error_message, t.branch_name, "
+        "t.retry_count, t.error_message, t.branch_name, t.hold, "
         "r.name as repo_name, "
         "substr(t.prompt, 1, 120) as title "
         "FROM tasks t JOIN repos r ON t.repo_id = r.id "
@@ -112,11 +112,19 @@ async def _build_status(db: Database) -> dict:
             row["elapsed"] = None
             row["elapsed_seconds"] = 0
 
+    # Check global pause
+    queue_paused = await db.is_queue_paused()
+
+    # Count held tasks
+    held_count = sum(1 for row in rows if row.get("hold"))
+
     return {
         "counts": counts,
         "repo_counts": repo_counts,
         "tasks": rows,
         "timestamp": now.isoformat(),
+        "queue_paused": queue_paused,
+        "held_count": held_count,
     }
 
 
@@ -281,6 +289,33 @@ DASHBOARD_HTML = """\
   .badge.done { background: rgba(139,148,158,0.1); color: var(--fg2); }
   .badge.fail { background: rgba(248,81,73,0.15); color: var(--red); }
   .badge.cxl { background: rgba(139,148,158,0.1); color: var(--fg2); }
+  .badge.aprv { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .badge.gate { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .badge.hold { background: rgba(248,81,73,0.1); color: var(--red); }
+
+  .btn-approve {
+    background: rgba(210,153,34,0.2); color: var(--yellow);
+    border: 1px solid var(--yellow); border-radius: 4px;
+    padding: 2px 8px; font-size: 11px; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn-approve:hover { background: rgba(210,153,34,0.4); }
+
+  .btn-pause {
+    background: rgba(248,81,73,0.15); color: var(--red);
+    border: 1px solid var(--red); border-radius: 4px;
+    padding: 4px 12px; font-size: 11px; cursor: pointer;
+    font-family: inherit; margin-left: 8px;
+  }
+  .btn-pause:hover { background: rgba(248,81,73,0.3); }
+  .btn-pause.resume { background: rgba(63,185,80,0.15); color: var(--green); border-color: var(--green); }
+  .btn-pause.resume:hover { background: rgba(63,185,80,0.3); }
+
+  .paused-indicator {
+    background: rgba(248,81,73,0.2); color: var(--red);
+    padding: 4px 12px; border-radius: 4px; font-weight: bold;
+    font-size: 13px;
+  }
 
   .model { color: var(--fg2); }
   .model.opus { color: var(--purple); }
@@ -327,6 +362,10 @@ DASHBOARD_HTML = """\
     <span class="value" id="cnt-review">-</span>
     <span class="label">Review</span>
   </div>
+  <div class="stat" style="--stat-color: var(--yellow);">
+    <span class="value" id="cnt-awaiting" style="color:var(--yellow)">-</span>
+    <span class="label">Awaiting</span>
+  </div>
   <div class="stat done">
     <span class="value" id="cnt-done">-</span>
     <span class="label">Done</span>
@@ -335,6 +374,8 @@ DASHBOARD_HTML = """\
     <span class="value" id="cnt-failed">-</span>
     <span class="label">Failed</span>
   </div>
+  <span id="paused-box" style="display:none"><span class="paused-indicator">PAUSED</span></span>
+  <button id="pause-btn" class="btn-pause" onclick="togglePause()">Pause Queue</button>
   <span style="margin-left:auto; font-size:11px; color:var(--fg2)">
     <span class="status-dot disconnected" id="sse-dot"></span>
     <span id="sse-label">connecting...</span>
@@ -378,10 +419,46 @@ const BADGE_CLS = {
   completed:"done", failed:"fail", cancelled:"cxl"
 };
 
-function badge(status) {
+const HOLD_BADGE = {
+  merge_approval: {cls:"aprv", label:"APRV"},
+  dispatch_approval: {cls:"gate", label:"GATE"},
+  user_hold: {cls:"hold", label:"HOLD"},
+  conflict_hold: {cls:"hold", label:"CNFL"},
+};
+
+let _queuePaused = false;
+
+function badge(status, hold) {
+  if (hold && HOLD_BADGE[hold]) {
+    const h = HOLD_BADGE[hold];
+    return `<span class="badge ${h.cls}">${h.label}</span>`;
+  }
   const cls = BADGE_CLS[status] || 'wait';
   const label = BADGES[status] || status;
   return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function approveBtn(task) {
+  if (!task.hold) return '';
+  return ` <button class="btn-approve" onclick="approveTask(${task.id})">Approve</button>`;
+}
+
+async function approveTask(id) {
+  try {
+    const res = await fetch('/api/tasks/' + id + '/approve', {method:'POST'});
+    if (!res.ok) {
+      const d = await res.json();
+      alert('Approve failed: ' + (d.error || res.statusText));
+    }
+  } catch(e) { alert('Approve error: ' + e); }
+}
+
+async function togglePause() {
+  const url = _queuePaused ? '/api/resume' : '/api/pause';
+  try {
+    const res = await fetch(url, {method:'POST'});
+    if (!res.ok) alert('Pause/resume failed: ' + res.statusText);
+  } catch(e) { alert('Error: ' + e); }
 }
 
 function modelTag(m) {
@@ -430,28 +507,30 @@ function renderTable(containerId, tasks, columns) {
 
 const activeCols = [
   {label:'ID', render: t => `#${t.id}`},
-  {label:'Status', render: t => badge(t.status)},
+  {label:'Status', render: t => badge(t.status, t.hold)},
   {label:'Repo', render: t => t.repo_name},
   {label:'Issue', render: issueLink},
   {label:'Model', render: t => modelTag(t.model)},
   {label:'Elapsed', render: t => t.elapsed ? `<span class="elapsed">${t.elapsed}</span>` : '-'},
   {label:'Title', render: t => `<span class="title-col">${(t.title||'').replace(/</g,'&lt;')}</span>`},
+  {label:'Actions', render: t => approveBtn(t)},
 ];
 
 const pipelineCols = [
   {label:'ID', render: t => `#${t.id}`},
-  {label:'Status', render: t => badge(t.status)},
+  {label:'Status', render: t => badge(t.status, t.hold)},
   {label:'Repo', render: t => t.repo_name},
   {label:'Issue', render: issueLink},
   {label:'PR', render: prLink},
   {label:'Model', render: t => modelTag(t.model)},
   {label:'Retries', render: t => t.retry_count || '0'},
   {label:'Title', render: t => `<span class="title-col">${(t.title||'').replace(/</g,'&lt;')}</span>`},
+  {label:'Actions', render: t => approveBtn(t)},
 ];
 
 const recentCols = [
   {label:'ID', render: t => `#${t.id}`},
-  {label:'Status', render: t => badge(t.status)},
+  {label:'Status', render: t => badge(t.status, t.hold)},
   {label:'Repo', render: t => t.repo_name},
   {label:'Issue', render: issueLink},
   {label:'PR', render: prLink},
@@ -467,8 +546,23 @@ function update(data) {
   document.getElementById('cnt-queued').textContent = (c.queued||0);
   document.getElementById('cnt-review').textContent =
     (c.pr_created||0) + (c.reviewing||0) + (c.reviewed||0);
+  document.getElementById('cnt-awaiting').textContent = (data.held_count||0);
   document.getElementById('cnt-done').textContent = (c.completed||0);
   document.getElementById('cnt-failed').textContent = (c.failed||0);
+
+  // Pause state
+  _queuePaused = !!data.queue_paused;
+  const pausedBox = document.getElementById('paused-box');
+  const pauseBtn = document.getElementById('pause-btn');
+  if (_queuePaused) {
+    pausedBox.style.display = '';
+    pauseBtn.textContent = 'Resume Queue';
+    pauseBtn.className = 'btn-pause resume';
+  } else {
+    pausedBox.style.display = 'none';
+    pauseBtn.textContent = 'Pause Queue';
+    pauseBtn.className = 'btn-pause';
+  }
 
   renderRepos(data.repo_counts || {});
 
@@ -513,6 +607,36 @@ connect();
 """
 
 
+async def approve_handler(request: web.Request) -> web.Response:
+    """Clear hold on a task, allowing it to proceed."""
+    db = request.app["db"]
+    task_id = int(request.match_info["id"])
+    task = await db.get_task(task_id)
+    if not task:
+        return web.json_response({"error": "not found"}, status=404)
+    if not task.get("hold"):
+        return web.json_response({"error": "no hold on this task"}, status=400)
+
+    await db.clear_hold(task_id)
+    await db.add_log(task_id, f"Hold '{task['hold']}' cleared via dashboard")
+    task = await db.get_task(task_id)
+    return web.json_response({"ok": True, "task": task})
+
+
+async def pause_handler(request: web.Request) -> web.Response:
+    """Pause the dispatch queue."""
+    db = request.app["db"]
+    await db.set_queue_paused(True)
+    return web.json_response({"ok": True, "queue_paused": True})
+
+
+async def resume_handler(request: web.Request) -> web.Response:
+    """Resume the dispatch queue."""
+    db = request.app["db"]
+    await db.set_queue_paused(False)
+    return web.json_response({"ok": True, "queue_paused": False})
+
+
 async def start_dashboard(db: Database, config: Config):
     """Start the dashboard web server. Runs until cancelled."""
     app = web.Application(middlewares=[auth_middleware(config.dashboard_password)])
@@ -523,6 +647,9 @@ async def start_dashboard(db: Database, config: Config):
     app.router.add_get("/api/tasks", tasks_handler)
     app.router.add_get("/api/tasks/{id}", task_detail_handler)
     app.router.add_get("/events", sse_handler)
+    app.router.add_post("/api/tasks/{id}/approve", approve_handler)
+    app.router.add_post("/api/pause", pause_handler)
+    app.router.add_post("/api/resume", resume_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()

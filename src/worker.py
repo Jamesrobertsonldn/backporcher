@@ -7,7 +7,7 @@ import signal
 
 from .config import Config, load_config
 from .db import Database
-from .dispatcher import _mark_issue_failed, _pick_retry_model, cleanup_task_artifacts, dispatch_task, orchestrate_batch, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
+from .dispatcher import _mark_issue_failed, _pick_retry_model, check_task_conflict, cleanup_task_artifacts, dispatch_task, orchestrate_batch, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
 from .github import (
     close_issue, close_pr, comment_on_issue, comment_on_pr,
     ensure_labels, extract_pr_number_from_url, find_new_issues,
@@ -40,12 +40,19 @@ class WorkerDaemon:
         """Launch concurrent loops (4 core + optional dashboard)."""
         self._running = True
         log.info(
-            "Worker daemon started (max_concurrency=%d, issue_poll=%ds, ci_poll=%ds, coordinator_model=%s)",
+            "Worker daemon started (max_concurrency=%d, issue_poll=%ds, ci_poll=%ds, coordinator_model=%s, approval_mode=%s)",
             self.config.max_workers,
             self.config.poll_interval_seconds,
             self.config.ci_check_interval_seconds,
             self.config.coordinator_model,
+            self.config.approval_mode,
         )
+
+        # Log tasks with holds so the user knows what's waiting
+        held = await self.db.list_held_tasks()
+        if held:
+            log.info("Tasks awaiting approval on startup: %s",
+                     ", ".join(f"#{t['id']}({t['hold']})" for t in held))
 
         loops = [
             self._issue_poller_loop(),
@@ -146,6 +153,13 @@ class WorkerDaemon:
             issue.number, task_id, priority, issue.title[:60],
         )
         await claim_issue(repo_full, issue.number)
+
+        # Dispatch gate: in review-all mode, hold tasks for approval before dispatch
+        if self.config.approval_mode == "review-all":
+            await self.db.set_hold(task_id, "dispatch_approval")
+            await self.db.add_log(task_id, "Held for dispatch approval (review-all mode)")
+            log.info("Task #%d: held for dispatch approval", task_id)
+
         return task_id
 
     async def _batch_create_tasks(
@@ -220,6 +234,11 @@ class WorkerDaemon:
         """Poll for queued tasks and dispatch them."""
         while self._running:
             try:
+                # Check global queue pause
+                if await self.db.is_queue_paused():
+                    await asyncio.sleep(EXECUTOR_POLL_SECONDS)
+                    continue
+
                 if self.semaphore._value > 0:
                     task = await self.db.claim_next_queued()
                     if task:
@@ -240,6 +259,45 @@ class WorkerDaemon:
                                 )
                                 await asyncio.sleep(0.1)
                                 continue
+
+                        # Pre-dispatch conflict check (non-full-auto modes)
+                        if self.config.approval_mode != "full-auto":
+                            inflight = await self.db.list_inflight_tasks_for_repo(task["repo_id"])
+                            if inflight:
+                                conflict = await check_task_conflict(
+                                    task["prompt"], inflight, self.config,
+                                )
+                                if conflict:
+                                    conflict_tid = conflict.get("conflicting_task_id")
+                                    reason = conflict.get("reason", "file overlap detected")
+                                    # Find the best task to serialize after
+                                    dep_target = None
+                                    if conflict_tid:
+                                        # Verify it's actually in-flight
+                                        for inf in inflight:
+                                            if inf["id"] == conflict_tid:
+                                                dep_target = conflict_tid
+                                                break
+                                    if not dep_target:
+                                        # Default to the most recent in-flight task
+                                        dep_target = inflight[-1]["id"]
+
+                                    log.info(
+                                        "Task #%d conflicts with #%d (%s), serializing",
+                                        task["id"], dep_target, reason,
+                                    )
+                                    await self.db.update_task(
+                                        task["id"],
+                                        status="queued",
+                                        started_at=None,
+                                        depends_on_task_id=dep_target,
+                                    )
+                                    await self.db.add_log(
+                                        task["id"],
+                                        f"Conflict detected with task #{dep_target}: {reason[:200]}. Serialized.",
+                                    )
+                                    await asyncio.sleep(0.1)
+                                    continue
 
                         log.info(
                             "Claimed task #%d: %s",
@@ -476,6 +534,17 @@ class WorkerDaemon:
                             completed_at=None,
                         )
 
+                # Sweep approved tasks: ci_passed with hold cleared → proceed to merge
+                approved_tasks = await self.db.list_tasks_by_status("ci_passed")
+                for task in approved_tasks:
+                    if task.get("hold"):
+                        continue  # Still held, skip
+                    pr_number = task.get("pr_number")
+                    if not pr_number:
+                        continue
+                    repo_full = repo_full_name_from_url(task["github_url"])
+                    await self._merge_approved_task(task, repo_full)
+
                 # Process retrying tasks
                 retry_tasks = await self.db.list_retrying_tasks()
                 for task in retry_tasks:
@@ -487,13 +556,28 @@ class WorkerDaemon:
             await asyncio.sleep(self.config.ci_check_interval_seconds)
 
     async def _handle_ci_passed(self, task: dict, repo_full: str):
-        """CI passed — auto-merge PR, mark completed, update labels."""
+        """CI passed — auto-merge PR (or hold for approval), mark completed, update labels."""
         task_id = task["id"]
         pr_number = task.get("pr_number")
 
         await self.db.update_task(task_id, status="ci_passed")
         await self.db.add_log(task_id, "CI checks passed")
         log.info("Task #%d: CI passed", task_id)
+
+        # Merge gate: in non-full-auto modes, hold for approval
+        if self.config.approval_mode != "full-auto":
+            await self.db.set_hold(task_id, "merge_approval")
+            await self.db.add_log(task_id, "Held for merge approval — run `voltron approve %d` or use dashboard" % task_id)
+            log.info("Task #%d: held for merge approval", task_id)
+            # Post PR comment
+            if pr_number:
+                from .github import comment_on_pr as _comment_on_pr
+                await _comment_on_pr(
+                    repo_full, pr_number,
+                    f"CI passed. Awaiting merge approval.\n\n"
+                    f"Run `voltron approve {task_id}` or use the dashboard to merge.",
+                )
+            return
 
         # Auto-merge the PR
         if pr_number:
@@ -563,6 +647,81 @@ class WorkerDaemon:
                         f"Re-add the `voltron` label to retry.",
                     )
                 await cleanup_task_artifacts(task, self.db)
+
+    async def _merge_approved_task(self, task: dict, repo_full: str):
+        """Merge a task that has been approved (ci_passed, hold cleared)."""
+        task_id = task["id"]
+        pr_number = task.get("pr_number")
+
+        log.info("Task #%d: merge approved, proceeding", task_id)
+        await self.db.add_log(task_id, "Merge approved, proceeding to merge")
+
+        merged = await merge_pr(repo_full, pr_number)
+        if merged:
+            await self.db.update_task(task_id, status="completed")
+            await self.db.add_log(task_id, f"PR #{pr_number} merged (squash)")
+            log.info("Task #%d: PR #%d merged", task_id, pr_number)
+
+            issue_num = task.get("github_issue_number")
+            if issue_num:
+                await update_issue_labels(
+                    repo_full, issue_num,
+                    add=["voltron-done"],
+                    remove=["voltron-in-progress"],
+                )
+                await comment_on_issue(
+                    repo_full, issue_num,
+                    "CI passed. PR has been merged. Closing issue.",
+                )
+                await close_issue(repo_full, issue_num)
+            await cleanup_task_artifacts(task, self.db)
+            return
+
+        # Merge failed — check if it's a conflict
+        conflicting = await is_pr_conflicting(repo_full, pr_number)
+        if conflicting:
+            await self.db.add_log(
+                task_id,
+                f"PR #{pr_number} has merge conflicts — closing and re-queuing",
+                level="warn",
+            )
+            log.warning("Task #%d: PR #%d has merge conflicts, re-queuing", task_id, pr_number)
+            await close_pr(
+                repo_full, pr_number,
+                comment="Merge conflict detected. Closing PR and re-running agent from latest main.",
+            )
+            await self.db.update_task(
+                task_id,
+                status="queued",
+                hold=None,
+                branch_name=None,
+                worktree_path=None,
+                pr_url=None,
+                pr_number=None,
+                review_summary=None,
+                started_at=None,
+                completed_at=None,
+            )
+        else:
+            await self.db.update_task(
+                task_id, status="failed",
+                error_message=f"Merge failed for PR #{pr_number} (no conflict detected)",
+            )
+            await self.db.add_log(task_id, f"Failed to merge PR #{pr_number} (no conflict)", level="error")
+
+            issue_num = task.get("github_issue_number")
+            if issue_num:
+                await update_issue_labels(
+                    repo_full, issue_num,
+                    add=["voltron-failed"],
+                    remove=["voltron-in-progress"],
+                )
+                await comment_on_issue(
+                    repo_full, issue_num,
+                    f"Merge failed for PR #{pr_number} (reason unknown, not a conflict).\n\n"
+                    f"Re-add the `voltron` label to retry.",
+                )
+            await cleanup_task_artifacts(task, self.db)
 
     async def _handle_ci_failure(self, task: dict, repo_full: str, ci):
         """CI failed — retry or mark failed."""

@@ -86,11 +86,19 @@ def cmd_fleet(args):
 
     # Count by status
     counts = {}
+    held_count = 0
     for t in tasks:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
+        if t.get("hold"):
+            held_count += 1
+
+    # Check global pause
+    paused = db.is_queue_paused()
 
     # Header
     parts = []
+    if paused:
+        parts.append("PAUSED")
     for status, label in [
         ("working", "running"),
         ("queued", "queued"),
@@ -102,6 +110,8 @@ def cmd_fleet(args):
     ]:
         if counts.get(status, 0) > 0:
             parts.append(f"{counts[status]} {label}")
+    if held_count > 0:
+        parts.append(f"{held_count} awaiting approval")
 
     if parts:
         print(f"Fleet: {', '.join(parts)}")
@@ -116,7 +126,7 @@ def cmd_fleet(args):
     if active:
         print("Active:")
         for t in active:
-            badge = _status_badge(t["status"])
+            badge = _status_badge(t["status"], t.get("hold"))
             issue = f" (#{t['github_issue_number']})" if t.get("github_issue_number") else ""
             retry = f" [retry {t['retry_count']}]" if t.get("retry_count", 0) > 0 else ""
             pri = f" P{t['priority']}" if t.get("priority") is not None and t["priority"] != 100 else ""
@@ -132,7 +142,7 @@ def cmd_fleet(args):
     if done:
         print("Recent:")
         for t in done:
-            badge = _status_badge(t["status"])
+            badge = _status_badge(t["status"], t.get("hold"))
             issue = f" (#{t['github_issue_number']})" if t.get("github_issue_number") else ""
             line = f"  #{t['id']:3d} [{badge}] {t['repo_name']:<15s}{issue} {t['prompt'][:50]}"
             if t.get("pr_url"):
@@ -164,6 +174,8 @@ def cmd_status(args):
             print(f"  Priority: {task['priority']}")
         if task.get("depends_on_task_id"):
             print(f"  Depends: task #{task['depends_on_task_id']}")
+        if task.get("hold"):
+            print(f"  Hold:    {task['hold']}")
         if task.get("branch_name"):
             print(f"  Branch:  {task['branch_name']}")
         if task.get("pr_url"):
@@ -199,7 +211,7 @@ def cmd_status(args):
             return
 
         for t in tasks:
-            badge = _status_badge(t["status"])
+            badge = _status_badge(t["status"], t.get("hold"))
             issue = f" #{t['github_issue_number']}" if t.get("github_issue_number") else ""
             line = f"  #{t['id']:3d} [{badge}]{issue} {t['repo_name']:<15s} {t['prompt'][:50]}"
             if t.get("pr_url"):
@@ -209,7 +221,15 @@ def cmd_status(args):
     db.close()
 
 
-def _status_badge(status: str) -> str:
+def _status_badge(status: str, hold: str | None = None) -> str:
+    if hold == "merge_approval":
+        return "APRV"
+    elif hold == "dispatch_approval":
+        return "GATE"
+    elif hold == "user_hold":
+        return "HOLD"
+    elif hold == "conflict_hold":
+        return "CNFL"
     return {
         "queued": "WAIT",
         "working": " RUN",
@@ -373,6 +393,84 @@ def cmd_cleanup(args):
     db.close()
 
 
+# --- approve / hold / release / pause / resume ---
+
+def cmd_approve(args):
+    db = get_db()
+    task = db.get_task(int(args.task_id))
+    if not task:
+        print(f"Task #{args.task_id} not found")
+        sys.exit(1)
+
+    hold = task.get("hold")
+    if not hold:
+        print(f"Task #{args.task_id} has no hold to clear")
+        sys.exit(1)
+
+    db.clear_hold(task["id"])
+    db.add_log(task["id"], f"Hold '{hold}' cleared via CLI approve")
+
+    if hold == "merge_approval":
+        print(f"Approved task #{task['id']} for merge. Will merge on next CI check cycle (~60s).")
+    elif hold == "dispatch_approval":
+        print(f"Approved task #{task['id']} for dispatch. Will be dispatched on next executor cycle (~5s).")
+    else:
+        print(f"Cleared hold '{hold}' on task #{task['id']}.")
+    db.close()
+
+
+def cmd_hold(args):
+    db = get_db()
+    task = db.get_task(int(args.task_id))
+    if not task:
+        print(f"Task #{args.task_id} not found")
+        sys.exit(1)
+
+    if task["status"] in ("completed", "failed", "cancelled"):
+        print(f"Cannot hold task #{args.task_id} (status={task['status']})")
+        sys.exit(1)
+
+    db.set_hold(task["id"], "user_hold")
+    db.add_log(task["id"], "User hold set via CLI")
+    print(f"Held task #{task['id']}. Use 'voltron approve {task['id']}' to release.")
+    db.close()
+
+
+def cmd_release(args):
+    db = get_db()
+    task = db.get_task(int(args.task_id))
+    if not task:
+        print(f"Task #{args.task_id} not found")
+        sys.exit(1)
+
+    if task.get("hold") != "user_hold":
+        print(f"Task #{args.task_id} does not have a user hold (hold={task.get('hold')})")
+        print(f"Use 'voltron approve {args.task_id}' to clear any hold type.")
+        sys.exit(1)
+
+    db.clear_hold(task["id"])
+    db.add_log(task["id"], "User hold released via CLI")
+    print(f"Released user hold on task #{task['id']}.")
+    db.close()
+
+
+def cmd_pause(args):
+    db = get_db()
+    db.set_queue_paused(True)
+    active = db.count_active()
+    queued = db.count_queued()
+    print(f"Queue paused. {active} task(s) still in-flight (will finish). {queued} queued task(s) on hold.")
+    db.close()
+
+
+def cmd_resume(args):
+    db = get_db()
+    db.set_queue_paused(False)
+    queued = db.count_queued()
+    print(f"Queue resumed. {queued} queued task(s) now eligible for dispatch.")
+    db.close()
+
+
 # --- worker ---
 
 def cmd_worker(args):
@@ -418,6 +516,19 @@ def main():
     cleanup_parser = sub.add_parser("cleanup", help="Remove worktrees")
     cleanup_parser.add_argument("task_id", nargs="?", help="Task ID (or all)")
 
+    # approve / hold / release / pause / resume
+    approve_parser = sub.add_parser("approve", help="Approve a held task (merge or dispatch)")
+    approve_parser.add_argument("task_id", help="Task ID")
+
+    hold_parser = sub.add_parser("hold", help="Set user hold on a task")
+    hold_parser.add_argument("task_id", help="Task ID")
+
+    release_parser = sub.add_parser("release", help="Release a user hold")
+    release_parser.add_argument("task_id", help="Task ID")
+
+    sub.add_parser("pause", help="Pause the dispatch queue")
+    sub.add_parser("resume", help="Resume the dispatch queue")
+
     # worker
     sub.add_parser("worker", help="Run worker daemon (foreground)")
 
@@ -440,6 +551,16 @@ def main():
         cmd_cancel(args)
     elif args.command == "cleanup":
         cmd_cleanup(args)
+    elif args.command == "approve":
+        cmd_approve(args)
+    elif args.command == "hold":
+        cmd_hold(args)
+    elif args.command == "release":
+        cmd_release(args)
+    elif args.command == "pause":
+        cmd_pause(args)
+    elif args.command == "resume":
+        cmd_resume(args)
     elif args.command == "worker":
         cmd_worker(args)
     else:

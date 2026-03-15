@@ -1016,8 +1016,114 @@ async def sync_agent_credentials(config: Config):
 def _pick_retry_model(current_model: str, retry_count: int) -> str:
     """Escalate model on retry. Sonnet -> opus after first attempt."""
     if current_model == "sonnet" and retry_count >= 1:
+        log.info("Model escalation: sonnet -> opus (retry %d)", retry_count)
         return "opus"
     return current_model
+
+
+CONFLICT_CHECK_PROMPT_TEMPLATE = """\
+You are a task conflict detector for a parallel code agent system. Given a new task and the \
+tasks already running in the same repository, determine if they likely touch overlapping files.
+
+## New Task
+{new_task_prompt}
+
+## Currently In-Flight Tasks
+{inflight_summaries}
+
+## Instructions
+Analyze whether the new task would likely modify the same files as any in-flight task.
+Consider: same components, same modules, same config files, same test files.
+Be conservative — if there's a reasonable chance of overlap, flag it.
+
+Respond with ONLY a JSON object (no markdown fences):
+{{"conflict": true/false, "conflicting_task_id": <id>|null, "reason": "brief explanation"}}
+"""
+
+
+async def check_task_conflict(
+    task_prompt: str, inflight_tasks: list[dict], config: Config,
+) -> dict | None:
+    """Check if a new task conflicts with in-flight tasks. Returns conflict info or None.
+
+    Calls haiku with a focused prompt. Fail-open: returns None on any error.
+    """
+    if not inflight_tasks:
+        return None
+
+    summaries = []
+    for t in inflight_tasks:
+        summaries.append(
+            f"- Task #{t['id']} ({t['status']}): {t['prompt'][:200]}"
+        )
+    inflight_text = "\n".join(summaries)
+
+    prompt = CONFLICT_CHECK_PROMPT_TEMPLATE.format(
+        new_task_prompt=task_prompt[:2000],
+        inflight_summaries=inflight_text,
+    )
+
+    cmd = ["claude", "-p", "--output-format", "text", "--model", "haiku", prompt]
+
+    if config.agent_user:
+        cmd = [
+            "sudo", "-u", config.agent_user, "--",
+            "prlimit", "--nproc=500", "--fsize=2147483648", "--",
+            *cmd,
+        ]
+        agent_env = None
+    else:
+        _sensitive_vars = {
+            "CLAUDECODE", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+            "GIT_ASKPASS", "GIT_CREDENTIALS", "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+        }
+        agent_env = {k: v for k, v in os.environ.items() if k not in _sensitive_vars}
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+        **({"env": agent_env} if agent_env is not None else {}),
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log.warning("Conflict check timed out, proceeding without blocking")
+        return None
+
+    output = stdout.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        log.warning("Conflict check failed (exit %d), proceeding", proc.returncode)
+        return None
+
+    # Strip markdown fences if present
+    cleaned = output
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines)
+
+    try:
+        result = json.loads(cleaned)
+    except json.JSONDecodeError:
+        log.warning("Conflict check returned invalid JSON: %s", cleaned[:200])
+        return None
+
+    if not isinstance(result, dict):
+        return None
+
+    if result.get("conflict"):
+        return result
+    return None
 
 
 async def dispatch_task(task: dict, config: Config, db: Database):

@@ -6,7 +6,7 @@ import aiosqlite
 from pathlib import Path
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count INTEGER DEFAULT 0,
     priority INTEGER DEFAULT 100,
     depends_on_task_id INTEGER,
+    hold TEXT,
     started_at TEXT,
     completed_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
@@ -157,6 +158,12 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_repo_id ON tasks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+
+CREATE TABLE IF NOT EXISTS system_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """)
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -243,6 +250,23 @@ CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
         except Exception:
             pass  # Column already exists
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority)")
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        conn.commit()
+
+    if version < 6:
+        # v6: add hold column to tasks + system_state table
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN hold TEXT")
+        except Exception:
+            pass  # Column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         conn.commit()
@@ -476,6 +500,7 @@ class Database:
                 "WHERE id = ("
                 "  SELECT t.id FROM tasks t"
                 "  WHERE t.status = 'queued'"
+                "    AND t.hold IS NULL"
                 "    AND ("
                 "      t.depends_on_task_id IS NULL"
                 "      OR EXISTS ("
@@ -511,7 +536,7 @@ class Database:
             "review_summary", "prompt", "model",
             "started_at", "completed_at",
             "pr_number", "github_issue_number", "github_issue_url", "retry_count",
-            "priority", "depends_on_task_id",
+            "priority", "depends_on_task_id", "hold",
         }
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
@@ -544,6 +569,66 @@ class Database:
             sub = await self.handle_dependency_failure(cid)
             all_cascaded.extend(sub)
         return all_cascaded
+
+    # --- Hold / Pause ---
+
+    async def set_hold(self, task_id: int, hold_reason: str):
+        """Set a hold on a task (prevents claiming/merging)."""
+        async with self._write_lock:
+            await self.db.execute(
+                "UPDATE tasks SET hold = ? WHERE id = ?",
+                (hold_reason, task_id),
+            )
+            await self.db.commit()
+
+    async def clear_hold(self, task_id: int):
+        """Clear hold on a task."""
+        async with self._write_lock:
+            await self.db.execute(
+                "UPDATE tasks SET hold = NULL WHERE id = ?",
+                (task_id,),
+            )
+            await self.db.commit()
+
+    async def list_held_tasks(self) -> list[dict]:
+        """List all tasks with a hold set."""
+        async with self.db.execute(
+            "SELECT t.*, r.name as repo_name FROM tasks t "
+            "JOIN repos r ON t.repo_id = r.id "
+            "WHERE t.hold IS NOT NULL "
+            "ORDER BY t.created_at DESC"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def is_queue_paused(self) -> bool:
+        """Check if the global queue is paused."""
+        async with self.db.execute(
+            "SELECT value FROM system_state WHERE key = 'queue_paused'"
+        ) as cur:
+            row = await cur.fetchone()
+            return row is not None and row[0] == "true"
+
+    async def set_queue_paused(self, paused: bool):
+        """Set or clear the global queue pause."""
+        async with self._write_lock:
+            now = datetime.now(timezone.utc).isoformat()
+            await self.db.execute(
+                "INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("queue_paused", "true" if paused else "false", now),
+            )
+            await self.db.commit()
+
+    async def list_inflight_tasks_for_repo(self, repo_id: int) -> list[dict]:
+        """List tasks in active statuses for a given repo (for conflict checking)."""
+        async with self.db.execute(
+            "SELECT t.*, r.name as repo_name FROM tasks t "
+            "JOIN repos r ON t.repo_id = r.id "
+            "WHERE t.repo_id = ? AND t.status IN ('working', 'pr_created', 'reviewing', 'reviewed') "
+            "ORDER BY t.created_at ASC",
+            (repo_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
     async def count_active(self) -> int:
         async with self.db.execute(
@@ -726,7 +811,7 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
             "review_summary", "prompt", "model",
             "started_at", "completed_at",
             "pr_number", "github_issue_number", "github_issue_url", "retry_count",
-            "priority", "depends_on_task_id",
+            "priority", "depends_on_task_id", "hold",
         }
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
@@ -756,6 +841,39 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
             sub = self.handle_dependency_failure(cid)
             all_cascaded.extend(sub)
         return all_cascaded
+
+    # --- Hold / Pause ---
+
+    def set_hold(self, task_id: int, hold_reason: str):
+        self.db.execute("UPDATE tasks SET hold = ? WHERE id = ?", (hold_reason, task_id))
+        self.db.commit()
+
+    def clear_hold(self, task_id: int):
+        self.db.execute("UPDATE tasks SET hold = NULL WHERE id = ?", (task_id,))
+        self.db.commit()
+
+    def list_held_tasks(self) -> list[dict]:
+        cur = self.db.execute(
+            "SELECT t.*, r.name as repo_name FROM tasks t "
+            "JOIN repos r ON t.repo_id = r.id "
+            "WHERE t.hold IS NOT NULL "
+            "ORDER BY t.created_at DESC"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def is_queue_paused(self) -> bool:
+        cur = self.db.execute("SELECT value FROM system_state WHERE key = 'queue_paused'")
+        row = cur.fetchone()
+        return row is not None and row[0] == "true"
+
+    def set_queue_paused(self, paused: bool):
+        now = datetime.now(timezone.utc).isoformat()
+        self.db.execute(
+            "INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            ("queue_paused", "true" if paused else "false", now),
+        )
+        self.db.commit()
 
     def count_active(self) -> int:
         cur = self.db.execute(

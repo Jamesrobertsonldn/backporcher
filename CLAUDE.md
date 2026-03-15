@@ -9,15 +9,16 @@ GitHub Issue (label: voltron)
   → Issue Poller (30s)
     → Batch Orchestrator (haiku, for 2+ issues per repo)
       → SQLite queue (with priority + dependency chain)
-        → Task Executor (semaphore: 2 concurrent, respects dependencies)
-          → Credential sync (auto if stale)
-            → claude -p in sandboxed worktree
-              → Build verification (optional, per-repo)
-                → git push + gh pr create
-                  → Coordinator Review (claude -p reviews diff)
-                    → CI Monitor (retries up to 3x on failure)
-                      → Auto-merge PR (squash)
-                        → Close issue (label: voltron-done)
+        → Conflict check (haiku, ~$0.001) — serializes overlapping tasks
+          → Task Executor (semaphore: 2 concurrent, respects dependencies)
+            → Credential sync (auto if stale)
+              → claude -p in sandboxed worktree
+                → Build verification (optional, per-repo)
+                  → git push + gh pr create
+                    → Coordinator Review (claude -p reviews diff)
+                      → CI Monitor (retries up to 3x on failure)
+                        → Merge gate (hold for approval or auto-merge)
+                          → Close issue (label: voltron-done)
 ```
 
 ## Six Concurrent Loops
@@ -35,24 +36,43 @@ The worker daemon (`src/worker.py`) runs up to 6 async loops via `asyncio.gather
 
 ```
 queued → working → pr_created → reviewing → reviewed → ci_passed → completed (merged)
+                                                                 → hold=merge_approval (review-merge mode)
+                                                                   → voltron approve → completed
                                                      → retrying → pr_created (retry loop, up to 3x)
                                                      → failed (max retries exhausted)
                               → reviewing → failed (coordinator rejected PR)
+       → hold=dispatch_approval (review-all mode) → voltron approve → working
        → failed (agent error / exit != 0)
        → completed (agent ran but no changes to push)
        → queued (auto-retry on transient failure, up to 2x)
 any    → cancelled (manual via CLI)
 ```
 
+## Orchestrator Mode
+
+Controls how much human oversight the pipeline requires. Set via `VOLTRON_APPROVAL_MODE`:
+
+| Mode | Dispatch | Merge | Default |
+|------|----------|-------|---------|
+| `full-auto` | automatic | automatic | |
+| `review-merge` | automatic | approval required | yes |
+| `review-all` | approval required | approval required | |
+
+**Hold system**: Tasks have a `hold` column. When set, the task is skipped by the relevant loop. Hold values: `merge_approval`, `dispatch_approval`, `user_hold`, `conflict_hold`. CLI commands: `voltron approve <id>`, `voltron hold <id>`, `voltron release <id>`.
+
+**Conflict detection**: Before dispatching, Haiku checks if the new task overlaps in file footprint with in-flight tasks in the same repo. If conflict detected, the new task gets `depends_on_task_id` set to the conflicting task (serializes them via the existing dependency mechanism).
+
+**Global pause**: `voltron pause` / `voltron resume` — freezes the dispatch queue. In-flight tasks finish normally.
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/cli.py` | CLI entry point: `fleet`, `status`, `cancel`, `cleanup`, `repo`, `worker` |
+| `src/cli.py` | CLI entry point: `fleet`, `status`, `cancel`, `cleanup`, `approve`, `hold`, `release`, `pause`, `resume`, `repo`, `worker` |
 | `src/worker.py` | Background daemon — 6 async loops, graceful shutdown, startup recovery, preflight checks |
 | `src/dashboard.py` | aiohttp web dashboard: HTTP Basic Auth, SSE real-time updates, JSON API, dark-themed HTML |
 | `src/dispatcher.py` | Worktree setup, credential sync, agent execution, build verification, PR creation, coordinator review runner, CI retry, transient failure auto-retry |
-| `src/db.py` | SQLite with WAL mode, schema migrations (v1→v5), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
+| `src/db.py` | SQLite with WAL mode, schema migrations (v1→v6), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
 | `src/config.py` | `Config` dataclass populated from environment variables |
 | `src/github.py` | All `gh` CLI wrappers — issues, labels, PRs, CI status, diffs, comments, merge, close. Runs as `administrator`, never sandboxed |
 | `voltron.service` | systemd unit file with security hardening directives |
@@ -61,13 +81,13 @@ any    → cancelled (manual via CLI)
 
 ## Database
 
-SQLite with WAL mode at `data/voltron.db`. Schema version 5.
+SQLite with WAL mode at `data/voltron.db`. Schema version 6.
 
-**Tables:** `repos` (with `verify_command`), `tasks` (with `review_summary`, `pr_number`, `retry_count`, `priority`, `depends_on_task_id`), `task_logs`, `schema_version`
+**Tables:** `repos` (with `verify_command`), `tasks` (with `review_summary`, `pr_number`, `retry_count`, `priority`, `depends_on_task_id`, `hold`), `task_logs`, `system_state`, `schema_version`
 
 **Concurrency:** All writes go through `asyncio.Lock` (`_write_lock`) to prevent SQLite write conflicts. `busy_timeout=5000ms` for reader contention. The sync wrapper (`SyncDatabase`) is used by CLI commands only.
 
-**Migrations:** Handled in `_migrate_sync()` — runs on every connect. Creates fresh v5 schema for new databases, or migrates existing v1→v2→v3→v4→v5 via table recreation + ALTER TABLE.
+**Migrations:** Handled in `_migrate_sync()` — runs on every connect. Creates fresh v6 schema for new databases, or migrates existing v1→v2→v3→v4→v5→v6 via table recreation + ALTER TABLE.
 
 **Dedup:** `get_task_by_issue()` checks all non-cancelled tasks for the same issue, preventing duplicate task creation even for failed tasks.
 
@@ -81,6 +101,7 @@ All config via environment variables (see `src/config.py`):
 | `VOLTRON_MAX_CONCURRENCY` | `2` | Max parallel agents (semaphore) |
 | `VOLTRON_DEFAULT_MODEL` | `sonnet` | Model for work agents |
 | `VOLTRON_COORDINATOR_MODEL` | `sonnet` | Model for PR review agent |
+| `VOLTRON_APPROVAL_MODE` | `review-merge` | `full-auto` / `review-merge` / `review-all` |
 | `VOLTRON_TASK_TIMEOUT` | `3600` | Agent hard-kill timeout (seconds) |
 | `VOLTRON_POLL_INTERVAL` | `30` | Issue poller interval (seconds) |
 | `VOLTRON_CI_CHECK_INTERVAL` | `60` | CI monitor interval (seconds) |
@@ -166,6 +187,11 @@ voltron repo verify <name>             # Clear verify command
 voltron fleet              # Dashboard: running/queued/reviewing/CI status
 voltron status             # All tasks overview
 voltron status <id>        # Single task detail with logs and review summary
+voltron approve <id>       # Approve a held task (merge or dispatch)
+voltron hold <id>          # Set user hold on any non-terminal task
+voltron release <id>       # Release a user hold
+voltron pause              # Pause the dispatch queue (in-flight tasks finish)
+voltron resume             # Resume the dispatch queue
 voltron cancel <id>        # Cancel task + kill agent + restore GitHub labels
 voltron cleanup            # Remove worktrees for finished tasks
 voltron cleanup <id>       # Remove specific task's worktree
@@ -185,6 +211,9 @@ voltron worker             # Run daemon foreground (for systemd)
 | ` REV` | reviewing (coordinator reviewing now) |
 | `RVWD` | reviewed (approved, awaiting CI) |
 | `  OK` | ci_passed |
+| `APRV` | ci_passed + hold=merge_approval (awaiting merge approval) |
+| `GATE` | queued + hold=dispatch_approval (awaiting dispatch approval) |
+| `HOLD` | any + hold=user_hold (manually held) |
 | ` RTY` | retrying (CI failed, agent re-running with CI logs) |
 | `DONE` | completed |
 | `FAIL` | failed |

@@ -39,6 +39,9 @@ class Config:
     # Smart retry (shared budget across all failure modes)
     max_task_retries: int = 3
 
+    # Approval mode: full-auto | review-merge | review-all
+    approval_mode: str = "review-merge"
+
     # Dashboard
     dashboard_port: int = 8080
     dashboard_password: str | None = None
@@ -80,6 +83,7 @@ def load_config() -> Config:
         coordinator_model=os.environ.get("VOLTRON_COORDINATOR_MODEL", "sonnet"),
         max_verify_retries=int(os.environ.get("VOLTRON_MAX_VERIFY_RETRIES", "2")),
         max_task_retries=int(os.environ.get("VOLTRON_MAX_TASK_RETRIES", "3")),
+        approval_mode=os.environ.get("VOLTRON_APPROVAL_MODE", "review-merge"),
         dashboard_port=int(os.environ.get("VOLTRON_DASHBOARD_PORT", "8080")),
         dashboard_password=os.environ.get("VOLTRON_DASHBOARD_PASSWORD") or None,
     )
