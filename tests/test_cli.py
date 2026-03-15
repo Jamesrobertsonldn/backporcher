@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 
 def voltron(*args):
@@ -9,7 +10,7 @@ def voltron(*args):
     result = subprocess.run(
         [sys.executable, "-m", "src.cli", *args],
         capture_output=True, text=True,
-        cwd="/home/administrator/voltron",
+        cwd=str(Path(__file__).resolve().parent.parent),
     )
     return result.returncode, result.stdout, result.stderr
 

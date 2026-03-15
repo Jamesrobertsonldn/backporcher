@@ -43,5 +43,5 @@ await run_cmd("chmod", "-R", "g+w", str(worktree_path))
 If agents complete with no PR and output mentions "permission denied" or
 "not writable", this is the cause. Check with:
 ```bash
-ls -la /home/administrator/deliverme/.worktrees/<task_id>/
+ls -la ~/voltron/repos/<repo>/.worktrees/<task_id>/
 ```

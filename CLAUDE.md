@@ -97,7 +97,7 @@ All config via environment variables (see `src/config.py`):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `VOLTRON_BASE_DIR` | `/home/administrator/voltron` | Project root |
+| `VOLTRON_BASE_DIR` | `~/voltron` | Project root |
 | `VOLTRON_MAX_CONCURRENCY` | `2` | Max parallel agents (semaphore) |
 | `VOLTRON_DEFAULT_MODEL` | `sonnet` | Model for work agents |
 | `VOLTRON_COORDINATOR_MODEL` | `sonnet` | Model for PR review agent |
@@ -108,9 +108,9 @@ All config via environment variables (see `src/config.py`):
 | `VOLTRON_MAX_CI_RETRIES` | `3` | Max CI failure retries per task |
 | `VOLTRON_MAX_VERIFY_RETRIES` | `2` | Max build verify fix attempts per task |
 | `VOLTRON_AGENT_USER` | (none) | Sandbox user for agents (e.g. `voltron-agent`) |
-| `VOLTRON_GITHUB_OWNER` | `montenegronyc` | GitHub org/owner |
-| `VOLTRON_ALLOWED_USERS` | `montenegronyc` | Comma-separated issue author allowlist |
-| `VOLTRON_DASHBOARD_PORT` | `8888` | Dashboard web server port |
+| `VOLTRON_GITHUB_OWNER` | (required) | GitHub org/owner |
+| `VOLTRON_ALLOWED_USERS` | (required) | Comma-separated issue author allowlist |
+| `VOLTRON_DASHBOARD_PORT` | `8080` | Dashboard web server port |
 | `VOLTRON_DASHBOARD_PASSWORD` | (none) | Dashboard password — dashboard disabled if unset |
 
 ## Security Model
@@ -125,7 +125,7 @@ Agents run as `voltron-agent` via `sudo -u voltron-agent`. This is a restricted 
 - Sensitive env vars (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, etc.) stripped from agent subprocess
 
 ### Privilege Separation
-- `gh` CLI (GitHub API) runs only in the worker process as `administrator` — agents never call `gh` directly
+- `gh` CLI (GitHub API) runs only in the worker process as the admin user — agents never call `gh` directly
 - The worker process is the only one that modifies issue labels, posts comments, merges/closes PRs
 - Agent output is treated as untrusted — summaries are truncated before storage
 
@@ -260,7 +260,7 @@ sqlite3 data/voltron.db ".schema tasks"
 sqlite3 data/voltron.db "SELECT status, COUNT(*) FROM tasks GROUP BY status"
 
 # Create test issue
-gh issue create --repo montenegronyc/deliverme \
+gh issue create --repo owner/repo \
   --title "Test task" --body "Do something" --label voltron
 
 # Credential rotation for sandbox user

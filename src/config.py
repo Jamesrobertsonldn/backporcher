@@ -4,12 +4,12 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-BASE_DIR = Path("/home/administrator/voltron")
+BASE_DIR = Path(os.environ.get("VOLTRON_BASE_DIR", str(Path.home() / "voltron")))
 
 
 @dataclass(frozen=True)
 class Config:
-    base_dir: Path = BASE_DIR
+    base_dir: Path = field(default_factory=lambda: BASE_DIR)
     db_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "voltron.db")
     repos_dir: Path = field(default_factory=lambda: BASE_DIR / "repos")
     logs_dir: Path = field(default_factory=lambda: BASE_DIR / "logs")
@@ -25,10 +25,10 @@ class Config:
     agent_user: str | None = None  # Run agents as this user via sudo -u
 
     # GitHub Issues integration
-    github_owner: str = "montenegronyc"
+    github_owner: str = ""
     max_ci_retries: int = 3
     ci_check_interval_seconds: int = 60
-    allowed_github_users: tuple[str, ...] = ("montenegronyc",)
+    allowed_github_users: tuple[str, ...] = ()
 
     # Coordinator review
     coordinator_model: str = "sonnet"
@@ -51,7 +51,7 @@ def load_config() -> Config:
     """Load config from environment variables."""
     base_dir = Path(os.environ.get("VOLTRON_BASE_DIR", str(BASE_DIR)))
 
-    allowed_users_str = os.environ.get("VOLTRON_ALLOWED_USERS", "montenegronyc")
+    allowed_users_str = os.environ.get("VOLTRON_ALLOWED_USERS", "")
     allowed_users = tuple(u.strip() for u in allowed_users_str.split(",") if u.strip())
 
     return Config(
@@ -74,7 +74,7 @@ def load_config() -> Config:
             os.environ.get("VOLTRON_POLL_INTERVAL", "30")
         ),
         agent_user=os.environ.get("VOLTRON_AGENT_USER") or None,
-        github_owner=os.environ.get("VOLTRON_GITHUB_OWNER", "montenegronyc"),
+        github_owner=os.environ.get("VOLTRON_GITHUB_OWNER", ""),
         max_ci_retries=int(os.environ.get("VOLTRON_MAX_CI_RETRIES", "3")),
         ci_check_interval_seconds=int(
             os.environ.get("VOLTRON_CI_CHECK_INTERVAL", "60")

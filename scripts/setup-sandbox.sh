@@ -3,7 +3,10 @@
 # Creates a restricted user, shared group, and minimal credentials
 # so agents can work in worktrees but can't access admin secrets.
 #
-# Run with: sudo bash scripts/setup-sandbox.sh
+# Usage:
+#   sudo bash scripts/setup-sandbox.sh                    # auto-detects SUDO_USER
+#   sudo bash scripts/setup-sandbox.sh --admin-user lee   # explicit admin user
+#
 # Idempotent — safe to re-run (e.g. after credential rotation).
 set -euo pipefail
 
@@ -12,11 +15,32 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-ADMIN_USER="administrator"
+# Parse arguments
+ADMIN_USER=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --admin-user) ADMIN_USER="$2"; shift 2 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# Auto-detect from SUDO_USER if not explicitly set
+if [[ -z "$ADMIN_USER" ]]; then
+    ADMIN_USER="${SUDO_USER:-}"
+    if [[ -z "$ADMIN_USER" || "$ADMIN_USER" == "root" ]]; then
+        echo "ERROR: Cannot detect admin user. Run with: sudo bash scripts/setup-sandbox.sh --admin-user <username>"
+        exit 1
+    fi
+fi
+
 AGENT_USER="voltron-agent"
 SHARED_GROUP="voltron"
 VOLTRON_DIR="/home/$ADMIN_USER/voltron"
 AGENT_HOME="/home/$AGENT_USER"
+
+echo "Admin user: $ADMIN_USER"
+echo "Voltron dir: $VOLTRON_DIR"
+echo ""
 
 echo "=== Voltron Agent Sandbox Setup ==="
 

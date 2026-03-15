@@ -85,8 +85,8 @@ any    → cancelled (manual)
 | `VOLTRON_MAX_CI_RETRIES` | 3 | Max CI failure retries |
 | `VOLTRON_MAX_VERIFY_RETRIES` | 2 | Max build verify fix attempts |
 | `VOLTRON_MAX_CONCURRENCY` | 2 | Parallel agent limit |
-| `VOLTRON_GITHUB_OWNER` | montenegronyc | GitHub owner |
-| `VOLTRON_ALLOWED_USERS` | montenegronyc | Comma-separated allowed issue authors |
+| `VOLTRON_GITHUB_OWNER` | (required) | GitHub owner |
+| `VOLTRON_ALLOWED_USERS` | (required) | Comma-separated allowed issue authors |
 | `VOLTRON_AGENT_USER` | — | Sandbox user for agent |
 | `VOLTRON_COORDINATOR_MODEL` | sonnet | Model for coordinator PR reviews |
 
@@ -117,7 +117,7 @@ journalctl -u voltron -f
 sqlite3 data/voltron.db "SELECT status, COUNT(*) FROM tasks GROUP BY status"
 
 # Create test issue
-gh issue create --repo montenegronyc/deliverme \
+gh issue create --repo owner/repo \
   --title "Test task" --body "Do something" --label voltron
 
 # Deploy new code

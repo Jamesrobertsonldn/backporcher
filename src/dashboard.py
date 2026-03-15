@@ -180,9 +180,12 @@ async def sse_handler(request: web.Request) -> web.StreamResponse:
     await response.prepare(request)
     db = request.app["db"]
 
+    github_owner = request.app.get("github_owner", "")
+
     try:
         while True:
             data = await _build_status(db)
+            data["github_owner"] = github_owner
             payload = f"data: {json.dumps(data)}\n\n"
             await response.write(payload.encode())
             await asyncio.sleep(5)
@@ -427,6 +430,7 @@ const HOLD_BADGE = {
 };
 
 let _queuePaused = false;
+let _githubOwner = '';
 
 function badge(status, hold) {
   if (hold && HOLD_BADGE[hold]) {
@@ -468,7 +472,7 @@ function modelTag(m) {
 function issueLink(task) {
   if (!task.github_issue_number) return '-';
   const repo = task.repo_name || '';
-  return `<a href="https://github.com/montenegronyc/${repo}/issues/${task.github_issue_number}" target="_blank">#${task.github_issue_number}</a>`;
+  return `<a href="https://github.com/${_githubOwner}/${repo}/issues/${task.github_issue_number}" target="_blank">#${task.github_issue_number}</a>`;
 }
 
 function prLink(task) {
@@ -552,6 +556,7 @@ function update(data) {
 
   // Pause state
   _queuePaused = !!data.queue_paused;
+  _githubOwner = data.github_owner || '';
   const pausedBox = document.getElementById('paused-box');
   const pauseBtn = document.getElementById('pause-btn');
   if (_queuePaused) {
@@ -641,6 +646,7 @@ async def start_dashboard(db: Database, config: Config):
     """Start the dashboard web server. Runs until cancelled."""
     app = web.Application(middlewares=[auth_middleware(config.dashboard_password)])
     app["db"] = db
+    app["github_owner"] = config.github_owner
 
     app.router.add_get("/", index_handler)
     app.router.add_get("/api/status", status_handler)

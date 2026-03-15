@@ -2,7 +2,7 @@
 
 A fully autonomous software engineering pipeline. Label a GitHub issue with `voltron`, and in ~20 minutes you get a merged PR with tests passing and the issue closed — no human in the loop.
 
-Built in 24 hours. 100% auto-merge rate on its first production run (15 PRs, zero manual interventions). This mirrors the agent orchestration architectures emerging from Anthropic's Claude Code and Augment's multi-agent systems — but as a standalone, open-source daemon you can run on your own infra.
+Built in early 2026. 100% auto-merge rate on its first production run (15 PRs, zero manual interventions). This mirrors the agent orchestration architectures emerging from Anthropic's Claude Code and Augment's multi-agent systems — but as a standalone, open-source daemon you can run on your own infra.
 
 ## What makes it different
 
@@ -53,7 +53,7 @@ voltron repo verify myrepo "npm test"
 # Set up sandbox user (one-time, requires root)
 sudo bash scripts/setup-sandbox.sh
 
-# Configure systemd (edit the env vars first)
+# Configure systemd (edit YOUR_USER and env vars first)
 sudo cp voltron.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now voltron
@@ -103,18 +103,20 @@ Six concurrent async loops in a single process:
 | Cleanup | 5min | Removes worktrees and remote branches for terminal tasks |
 | Dashboard | always | aiohttp web server with SSE, approve buttons, pause/resume |
 
-The codebase is intentionally minimal — no web framework, no ORM, no task queue library. Just asyncio + SQLite + subprocess + `gh` CLI.
+No web framework, no ORM, no task queue library. Just asyncio + SQLite + subprocess + `gh` CLI. Fewer dependencies means a smaller attack surface and an easier audit.
 
 ## Configuration
 
-All via environment variables:
+All via environment variables (set in `voltron.service` or your shell):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `VOLTRON_BASE_DIR` | `~/voltron` | Project root |
 | `VOLTRON_MAX_CONCURRENCY` | `2` | Parallel agents |
 | `VOLTRON_APPROVAL_MODE` | `review-merge` | `full-auto` / `review-merge` / `review-all` |
 | `VOLTRON_AGENT_USER` | (none) | Sandbox user (e.g. `voltron-agent`) |
-| `VOLTRON_ALLOWED_USERS` | `montenegronyc` | Comma-separated issue author allowlist |
+| `VOLTRON_GITHUB_OWNER` | (required) | GitHub org or username that owns the repos |
+| `VOLTRON_ALLOWED_USERS` | (required) | Comma-separated issue author allowlist |
 | `VOLTRON_DEFAULT_MODEL` | `sonnet` | Default agent model |
 | `VOLTRON_COORDINATOR_MODEL` | `sonnet` | PR review model |
 | `VOLTRON_MAX_CI_RETRIES` | `3` | CI failure retries per task |
@@ -124,12 +126,31 @@ All via environment variables:
 
 ## Security Model
 
-- **Agent sandbox**: `claude -p` runs as `voltron-agent` via `sudo -u` with `prlimit` (500 processes, 2GB file limit)
-- **Privilege separation**: `gh` CLI (GitHub API) only runs in the worker process — agents can't post comments, merge PRs, or modify issues
-- **Author allowlist**: only issues from specified GitHub users are picked up
-- **Credential isolation**: agent user gets copied credentials, can't read admin's `~/.ssh`, `~/.claude`, or env secrets
-- **Env scrubbing**: `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, etc. stripped from agent subprocesses
-- **systemd hardening**: `PrivateTmp`, `PrivateDevices`, `ProtectSystem=full`, `RestrictNamespaces`, etc.
+Most open-source agent tools run with full user privileges. Voltron doesn't. The entire design is built around the assumption that **AI-generated code is untrusted** — and the system treats it that way at every layer.
+
+### Privilege Separation
+
+The worker daemon runs as your user and handles all GitHub API operations (comments, merges, label changes, issue closes). Agents run as a separate `voltron-agent` user via `sudo -u` — a restricted system account that:
+
+- **Can:** Read/write worktree files, git commit/push, run build/test tools
+- **Cannot:** Read your `~/.ssh`, `~/.claude`, GitHub tokens, or any env secrets. Cannot sudo. Cannot modify system files. Cannot access other repos
+
+This means a compromised or misbehaving agent can only damage the worktree it was assigned. It can't escalate to GitHub admin operations, read credentials, or affect other tasks.
+
+### Defense in Depth
+
+| Layer | What it does |
+|-------|-------------|
+| **Agent sandbox** | `sudo -u voltron-agent` with `prlimit` (500 processes, 2GB file limit) |
+| **Env scrubbing** | `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, etc. stripped from agent subprocesses |
+| **Author allowlist** | Only issues from specified GitHub users trigger agents — prevents arbitrary code execution from unknown authors |
+| **Coordinator review** | A separate agent reviews every PR diff for bugs, regressions, and scope creep before CI runs |
+| **systemd hardening** | `PrivateTmp`, `PrivateDevices`, `ProtectSystem=full`, `RestrictNamespaces`, and more |
+| **Credential copying** | Agent gets credential *copies*, not symlinks — no path traversal back to your home |
+
+### Design Trade-offs
+
+The coordinator review is **fail-open**: if the review agent errors out, the PR is auto-approved and CI becomes the sole gate. This is pragmatic for a solo operator (a stuck review shouldn't block the pipeline), but in a team context you'd want to flip this to fail-closed. A one-line change in `worker.py`.
 
 ## Self-Healing
 
@@ -147,6 +168,12 @@ When an agent fails, Voltron doesn't just retry blindly:
 - **Build verification failure**: re-runs agent with error output as context
 - **CI failure**: fetches CI logs, re-runs agent with failure context
 - **Coordinator rejection**: closes PR, re-queues with reviewer feedback injected into prompt
+
+## Scaling Limits
+
+Voltron uses SQLite with WAL mode and a single async write lock. This is production-grade for single-writer workloads and works well at 2-5 concurrent agents. At 10+ concurrent agents, the write lock would become a bottleneck — you'd want to move to PostgreSQL or shard the task queue. For most users running on a single machine, this isn't a practical concern. If you need multi-machine scaling, Voltron's architecture (poller → queue → executor) maps cleanly onto a proper job queue like Redis + RQ.
+
+SQLite + WAL mode is not a toy database. It's what [Litestream](https://litestream.io/) was built to back up, and it handles the write patterns here (a few writes per minute) with no contention. If you want backup guarantees, point Litestream at `data/voltron.db`.
 
 ## GitHub Labels
 

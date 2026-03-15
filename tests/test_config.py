@@ -14,8 +14,8 @@ class TestConfigDefaults:
         assert config.poll_interval_seconds == 30
         assert config.max_ci_retries == 3
         assert config.ci_check_interval_seconds == 60
-        assert config.github_owner == "montenegronyc"
-        assert config.allowed_github_users == ("montenegronyc",)
+        assert config.github_owner == ""
+        assert config.allowed_github_users == ()
         assert config.max_workers == 2
         assert config.default_model == "sonnet"
         assert config.agent_user is None

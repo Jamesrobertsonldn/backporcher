@@ -41,36 +41,43 @@ def make_v1_db(path: Path):
 
 class TestSchemaMigration:
     def test_fresh_database(self, tmp_path):
-        """Fresh DB gets v2 schema directly."""
+        """Fresh DB gets latest schema."""
         db_path = tmp_path / "fresh.db"
         db = SyncDatabase(db_path)
         db.connect()
 
-        # Should be version 2
+        # Should be latest version
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 2
+        assert cur.fetchone()[0] == 6
 
-        # Should have new columns
+        # Should have all columns across all migrations
         cur = db.db.execute("PRAGMA table_info(tasks)")
         columns = {row[1] for row in cur.fetchall()}
         assert "github_issue_number" in columns
         assert "github_issue_url" in columns
         assert "pr_number" in columns
         assert "retry_count" in columns
+        assert "priority" in columns
+        assert "depends_on_task_id" in columns
+        assert "hold" in columns
+
+        # Should have system_state table
+        cur = db.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='system_state'")
+        assert cur.fetchone() is not None
 
         db.close()
 
-    def test_v1_to_v2_migration(self, tmp_path):
-        """Migrate v1 database preserving all data."""
+    def test_v1_to_latest_migration(self, tmp_path):
+        """Migrate v1 database all the way to latest, preserving data."""
         db_path = tmp_path / "v1.db"
         make_v1_db(db_path)
 
         db = SyncDatabase(db_path)
         db.connect()
 
-        # Version upgraded
+        # Version upgraded to latest
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 2
+        assert cur.fetchone()[0] == 6
 
         # Data preserved
         cur = db.db.execute("SELECT COUNT(*) FROM tasks")
@@ -110,7 +117,7 @@ class TestSchemaMigration:
         db.connect()
 
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 2
+        assert cur.fetchone()[0] == 6
 
         cur = db.db.execute("SELECT COUNT(*) FROM tasks")
         assert cur.fetchone()[0] == 2
@@ -286,20 +293,23 @@ class TestAsyncDatabase:
         assert found is None
 
     @pytest.mark.asyncio
-    async def test_get_task_by_issue_excludes_failed(self, db):
+    async def test_get_task_by_issue_includes_failed(self, db):
+        """Failed tasks are still found (prevents duplicate pickup of same issue)."""
         await db.add_repo("r", "https://github.com/t/r", "/tmp/r")
         tid = await db.create_task_from_issue(1, "fix", "sonnet", 5, "url")
         await db.update_task(tid, status="failed")
 
         found = await db.get_task_by_issue(1, 5)
-        assert found is None
+        assert found is not None
+        assert found["id"] == tid
 
     @pytest.mark.asyncio
     async def test_list_pr_tasks(self, db):
+        """list_pr_tasks returns tasks with status=reviewed (awaiting CI)."""
         await db.add_repo("r", "https://github.com/t/r", "/tmp/r")
         tid1 = await db.create_task(1, "a", "sonnet")
         tid2 = await db.create_task(1, "b", "sonnet")
-        await db.update_task(tid1, status="pr_created")
+        await db.update_task(tid1, status="reviewed")
         await db.update_task(tid2, status="working")
 
         pr_tasks = await db.list_pr_tasks()
