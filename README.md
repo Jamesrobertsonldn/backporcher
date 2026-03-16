@@ -2,7 +2,7 @@
 
 ![Backporcher Demo](resources/backporcher_demo.gif)
 
-A fully autonomous software engineering pipeline. Label a GitHub issue with `backporcher`, and in ~20 minutes you get a merged PR with tests passing and the issue closed — no human in the loop.
+A fully autonomous software engineering pipeline. Label a GitHub issue with `backporcher`, and in ~20 minutes you get a merged PR with tests passing and the issue closed. A real-time web dashboard lets you manage the fleet: approve or hold tasks before merge, pause/resume the dispatch queue, re-run failed agents, and monitor every stage of the pipeline from triage to merge.
 
 Built in early 2026. 100% auto-merge rate on its first production run (15 PRs, zero manual interventions). This mirrors the agent orchestration architectures emerging from Anthropic's Claude Code and Augment's multi-agent systems — but as a standalone, open-source daemon you can run on your own infra.
 
@@ -93,7 +93,16 @@ backporcher worker             # Run daemon foreground
 
 ## Web Dashboard
 
-Real-time dark-themed dashboard with SSE updates every 5 seconds. Enable by setting `BACKPORCHER_DASHBOARD_PASSWORD`. Shows repo breakdown, active agents with elapsed time, pipeline status, and approve/pause buttons.
+Real-time orchestration dashboard with SSE updates every 5 seconds. Enable by setting `BACKPORCHER_DASHBOARD_PASSWORD`.
+
+- **Fleet overview** — every task's status, repo, model, elapsed time, and current pipeline stage
+- **Agent visualizer** — animated orbs showing which agents (coordinator, orchestrator, workers) are active
+- **Task control** — approve, hold, reject, re-queue, or escalate individual tasks inline
+- **Dispatch on demand** — run a single task immediately without waiting for the poller
+- **Edit in flight** — rewrite a task's prompt, switch its model, or change priority before dispatch
+- **Pipeline metrics** — merged count, success rate, average time-to-merge, retry rate
+- **Global pause/resume** — freeze the dispatch queue while in-flight work finishes
+- **Task detail panel** — full timeline with logs, review summary, PR link, and error context
 
 ## Architecture
 
