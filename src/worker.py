@@ -264,6 +264,8 @@ class WorkerDaemon:
                         # Pre-dispatch conflict check (non-full-auto modes)
                         if self.config.approval_mode != "full-auto":
                             inflight = await self.db.list_inflight_tasks_for_repo(task["repo_id"])
+                            # Exclude self — we were just claimed and are now 'working'
+                            inflight = [t for t in inflight if t["id"] != task["id"]]
                             if inflight:
                                 conflict = await check_task_conflict(
                                     task["prompt"], inflight, self.config,
