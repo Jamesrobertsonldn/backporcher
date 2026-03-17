@@ -1,4 +1,4 @@
-"""Background worker daemon: 4 concurrent loops — issue poller, task executor, coordinator reviewer, CI monitor."""
+"""Background worker daemon: 5 core loops + optional dashboard — issue poller, task executor, coordinator reviewer, CI monitor, artifact cleanup."""
 
 import asyncio
 import logging

@@ -58,10 +58,12 @@ sudo bash scripts/setup-sandbox.sh
 # Generate local service files from templates
 ./scripts/configure.sh
 
-# Install systemd unit
-sudo cp backporcher.service /etc/systemd/system/
+# Install systemd units
+sudo cp backporcher.service backporcher-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now backporcher
+# Optional: enable dashboard (requires BACKPORCHER_DASHBOARD_PASSWORD in service file)
+sudo systemctl enable --now backporcher-dashboard
 
 # Create an issue to test
 gh issue create --repo owner/repo \
@@ -86,7 +88,9 @@ backporcher pause              # Freeze the dispatch queue
 backporcher resume             # Unfreeze
 backporcher cancel <id>        # Kill agent, cancel task, restore labels
 backporcher cleanup            # Remove worktrees for finished tasks
+backporcher stats              # Pipeline performance stats
 backporcher repo add <url>     # Register a GitHub repo
+backporcher repo list          # List registered repos
 backporcher repo verify <n> <cmd>  # Set build verification command
 backporcher worker             # Run daemon foreground
 ```
@@ -117,7 +121,7 @@ Six concurrent async loops in a single process:
 | Cleanup | 5min | Removes worktrees and remote branches for terminal tasks |
 | Dashboard | always | aiohttp web server with SSE, approve buttons, pause/resume |
 
-No web framework, no ORM, no task queue library. Just asyncio + SQLite + subprocess + `gh` CLI. Fewer dependencies means a smaller attack surface and an easier audit.
+No ORM, no task queue library. Just asyncio + aiohttp + SQLite + subprocess + `gh` CLI. Fewer dependencies means a smaller attack surface and an easier audit.
 
 ## Configuration
 
@@ -135,8 +139,15 @@ All via environment variables (set in your `.service` file or shell):
 | `BACKPORCHER_COORDINATOR_MODEL` | `sonnet` | PR review model |
 | `BACKPORCHER_MAX_CI_RETRIES` | `3` | CI failure retries per task |
 | `BACKPORCHER_MAX_TASK_RETRIES` | `3` | Agent failure retries (escalates sonnet→opus) |
+| `BACKPORCHER_TASK_TIMEOUT` | `3600` | Agent hard-kill timeout (seconds) |
+| `BACKPORCHER_POLL_INTERVAL` | `30` | Issue poller interval (seconds) |
+| `BACKPORCHER_CI_CHECK_INTERVAL` | `60` | CI monitor interval (seconds) |
+| `BACKPORCHER_MAX_VERIFY_RETRIES` | `2` | Build verification fix attempts per task |
 | `BACKPORCHER_DASHBOARD_PORT` | `8080` | Dashboard port |
+| `BACKPORCHER_DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind address |
 | `BACKPORCHER_DASHBOARD_PASSWORD` | (none) | Dashboard password (required to enable) |
+| `BACKPORCHER_WEBHOOK_URL` | (none) | Webhook URL for notifications (Slack/Discord) |
+| `BACKPORCHER_WEBHOOK_EVENTS` | `hold,failed` | Comma-separated: `hold`, `failed`, `completed`, `paused` |
 
 ## Security Model
 
@@ -168,9 +179,9 @@ The coordinator review is **fail-open**: if the review agent errors out, the PR 
 
 ## Self-Healing
 
-- Stale tasks recovered on restart (working → queued, reviewing → re-review)
+- Stale tasks recovered on restart (working → queued, reviewing → pr_created for re-review)
 - Credentials auto-synced when admin's are newer than agent's
-- Transient failures (auth, permissions, stale branches) auto-retry
+- Agent failures auto-retry with model escalation (sonnet → opus)
 - Merge conflicts detected and re-queued from fresh main
 - Task failure cascades recursively through dependency chains
 - Worktrees and remote branches cleaned up automatically

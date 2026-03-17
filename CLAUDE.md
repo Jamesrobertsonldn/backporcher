@@ -148,7 +148,7 @@ Only issues created by users in `BACKPORCHER_ALLOWED_USERS` are picked up. Preve
 1. **Idempotent branch cleanup** — Before creating a worktree, deletes any stale branch from a previous attempt. Re-queuing a failed task always works.
 2. **Startup recovery** — On daemon start, `working` tasks are reset to `queued` and `reviewing` tasks to `pr_created`. No manual intervention needed after crashes.
 3. **Credential auto-sync** — Before each dispatch, compares admin vs agent credential file mtimes. If admin's are newer, auto-copies to agent user.
-4. **Transient failure auto-retry** — Auth errors, EACCES, stale branches, and missing directories auto-retry up to 2x instead of marking permanently failed.
+4. **Agent failure auto-retry** — Any non-zero agent exit code triggers re-queue with model escalation (sonnet → opus), up to `max_task_retries` (default 3). Stale branches are cleaned up idempotently before each dispatch.
 5. **PR number backfill** — If `pr_number` is NULL but `pr_url` exists, the coordinator extracts it automatically. Never blocks on missing data.
 6. **Startup preflight** — Verifies agent user can access repos directory and syncs credentials before entering poll loops.
 7. **Dependency failure cascade** — When a task fails, all queued tasks that depend on it (and their dependents) are automatically marked as failed.
@@ -311,7 +311,7 @@ pip install -e .
 # Run worker foreground (ctrl+c to stop)
 backporcher worker
 
-# Python 3.11+ required, single dependency (aiosqlite)
+# Python 3.11+ required, two dependencies (aiosqlite, aiohttp)
 ```
 
-The codebase is intentionally minimal — no web framework, no ORM, no task queue library. Just asyncio + sqlite + subprocess + gh CLI.
+The codebase is intentionally minimal — no ORM, no task queue library. Just asyncio + aiohttp + sqlite + subprocess + gh CLI.
