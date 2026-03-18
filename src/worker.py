@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from .config import Config, load_config
 from .db import Database
-from .dispatcher import _mark_issue_failed, _pick_retry_model, check_task_conflict, cleanup_task_artifacts, dispatch_task, orchestrate_batch, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
+from .dispatcher import _mark_issue_failed, _pick_retry_model, check_task_conflict, cleanup_task_artifacts, clone_or_fetch, dispatch_task, orchestrate_batch, retry_with_ci_context, run_review, sync_agent_credentials, triage_issue
 from .github import (
     close_issue, close_pr, comment_on_issue, comment_on_pr,
     ensure_labels, extract_pr_number_from_url, find_new_issues,
@@ -980,6 +980,20 @@ async def _run_worker():
     # Preflight checks
     log.info("Running preflight checks...")
     preflight_ok = True
+
+    # Sync all repos — clone if missing, fetch latest if present
+    repos = await db.list_repos()
+    if repos:
+        log.info("Syncing %d repo(s)...", len(repos))
+        for repo in repos:
+            try:
+                await clone_or_fetch(repo, config)
+                log.info("Repo synced: %s", repo["name"])
+            except Exception as e:
+                log.error("Failed to sync repo %s: %s", repo["name"], e)
+                preflight_ok = False
+    else:
+        log.warning("No repos registered — nothing to sync")
 
     # Check agent user can access repos
     if config.agent_user:

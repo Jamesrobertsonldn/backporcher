@@ -1,21 +1,21 @@
 /* ═══════════════════════════════════════════════════════════════
    BACKPORCHER DASHBOARD — TACTICAL DATA INTERFACE THEME
-   Cyan-dominant, corner-bracketed, data-dense, dark field
+   Steel gray, corner-bracketed, data-dense, high-contrast dark field
    ═══════════════════════════════════════════════════════════════ */
 
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap');
 
 :root {
-  --bg-base: #060b14;
-  --bg-surface: #0a1020;
-  --bg-elevated: #0d1629;
-  --bg-overlay: rgba(6, 11, 20, 0.92);
+  --bg-base: #0c0d10;
+  --bg-surface: #12131a;
+  --bg-elevated: #1a1c24;
+  --bg-overlay: rgba(8, 9, 12, 0.92);
 
-  --c-primary: #00d4ff;
-  --c-primary-bright: #40e8ff;
-  --c-primary-dim: #0088aa;
-  --c-primary-muted: rgba(0, 212, 255, 0.08);
-  --c-primary-glow: rgba(0, 212, 255, 0.35);
+  --c-primary: #b8c0cc;
+  --c-primary-bright: #dce0e8;
+  --c-primary-dim: #7a8290;
+  --c-primary-muted: rgba(180, 190, 205, 0.08);
+  --c-primary-glow: rgba(180, 190, 205, 0.25);
 
   --c-accent: #e8a317;
   --c-accent-bright: #ffc857;
@@ -30,13 +30,13 @@
   --c-success-dim: #009648;
   --c-success-muted: rgba(0, 230, 118, 0.08);
 
-  --text-1: #d0e8f0;
-  --text-2: #7a9aaa;
-  --text-3: #3d5a6a;
+  --text-1: #e8eaef;
+  --text-2: #8a8e9a;
+  --text-3: #4a4e5a;
 
-  --border: rgba(0, 212, 255, 0.12);
-  --border-active: rgba(0, 212, 255, 0.30);
-  --border-subtle: rgba(0, 212, 255, 0.05);
+  --border: rgba(180, 190, 205, 0.12);
+  --border-active: rgba(180, 190, 205, 0.30);
+  --border-subtle: rgba(180, 190, 205, 0.05);
 
   --font-mono: 'Share Tech Mono', 'JetBrains Mono', 'SF Mono', monospace;
   --font-display: 'Rajdhani', 'Share Tech Mono', monospace;
@@ -147,7 +147,7 @@ body::after {
   position: absolute;
   width: var(--corner-size);
   height: var(--corner-size);
-  border-color: var(--c-primary);
+  border-color: var(--c-primary-dim);
   border-style: solid;
   border-width: 0;
   opacity: 0.5;
@@ -171,7 +171,7 @@ body::after {
   position: absolute;
   width: var(--corner-size);
   height: var(--corner-size);
-  border-color: var(--c-primary);
+  border-color: var(--c-primary-dim);
   border-style: solid;
   border-width: 0;
   opacity: 0.5;
@@ -281,10 +281,10 @@ body::after {
 }
 
 .badge-wait { color: var(--text-3); border-color: var(--text-3); }
-.badge-run  { color: var(--c-primary); border-color: var(--c-primary); background: var(--c-primary-muted); animation: badge-pulse 2s ease-in-out infinite; box-shadow: 0 0 6px var(--c-primary-glow); }
+.badge-run  { color: var(--c-primary); border-color: var(--c-primary-dim); background: var(--c-primary-muted); animation: badge-pulse 2s ease-in-out infinite; box-shadow: 0 0 6px var(--c-primary-glow); }
 .badge-pr   { color: var(--c-primary-dim); border-color: var(--c-primary-dim); }
 .badge-rev  { color: var(--c-primary-dim); border-color: var(--c-primary-dim); animation: badge-pulse 2.5s ease-in-out infinite; }
-.badge-rvwd { color: var(--c-primary); border-color: var(--c-primary); background: var(--c-primary-muted); }
+.badge-rvwd { color: var(--c-primary); border-color: var(--c-primary-dim); background: var(--c-primary-muted); }
 .badge-ok   { color: var(--c-success); border-color: var(--c-success); background: var(--c-success-muted); }
 .badge-aprv { color: var(--c-accent); border-color: var(--c-accent); background: var(--c-accent-muted); animation: badge-pulse 1.5s ease-in-out infinite; }
 .badge-gate { color: var(--c-accent); border-color: var(--c-accent); background: var(--c-accent-muted); }
@@ -317,7 +317,7 @@ body::after {
 
 .btn:active { transform: scale(0.97); }
 
-.btn-approve { border-color: var(--c-primary); color: var(--c-primary); }
+.btn-approve { border-color: var(--c-primary-dim); color: var(--c-primary); }
 .btn-approve:hover { background: var(--c-primary); color: var(--bg-base); box-shadow: 0 0 12px var(--c-primary-glow); }
 
 .btn-hold { border-color: var(--c-accent); color: var(--c-accent); }

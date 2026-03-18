@@ -185,7 +185,7 @@ async def _build_status(db: Database) -> dict:
         "r.name as repo_name, "
         "substr(t.prompt, 1, 120) as title "
         "FROM tasks t JOIN repos r ON t.repo_id = r.id "
-        "ORDER BY t.created_at DESC LIMIT 100"
+        "ORDER BY t.created_at DESC"
     ) as cur:
         rows = [dict(r) for r in await cur.fetchall()]
 
@@ -312,35 +312,36 @@ DASHBOARD_HTML = """\
 <title>Backporcher Dashboard</title>
 <style>
 /* ═══════════════════════════════════════════════════════
-   BACKPORCHER — Apple Liquid Glass Theme
-   Translucent panels, backdrop blur, inset light/shadow
+   BACKPORCHER — Steel Glass Theme
+   Translucent panels, backdrop blur, high-contrast steel gray
    ═══════════════════════════════════════════════════════ */
 
 :root {
-  /* Surface — brighter steel-blue gradient base */
-  --bg-base: #1a2438;
-  --bg-surface: rgba(255,255,255,0.12);
-  --bg-elevated: rgba(255,255,255,0.18);
-  --bg-overlay: rgba(0,0,0,0.55);
+  /* Surface — steel gray base */
+  --bg-base: #1a1d24;
+  --bg-surface: rgba(255,255,255,0.10);
+  --bg-elevated: rgba(255,255,255,0.16);
+  --bg-overlay: rgba(0,0,0,0.60);
 
   /* Glass — flat, premium */
   --glass-blur: 14px;
-  --glass-border: 0.5px solid rgba(255,255,255,0.15);
-  --glass-shadow: inset 0 0.5px 0 rgba(255,255,255,0.18);
-  --glass-shadow-lg: inset 0 0.5px 0 rgba(255,255,255,0.18);
-  --glass-texture-bg: rgba(255,255,255,0.07);
+  --glass-border: 0.5px solid rgba(255,255,255,0.13);
+  --glass-shadow: inset 0 0.5px 0 rgba(255,255,255,0.16);
+  --glass-shadow-lg: inset 0 0.5px 0 rgba(255,255,255,0.16);
+  --glass-texture-bg: rgba(255,255,255,0.06);
   --glass-texture-blur: 2px;
 
-  /* Accent — vivid blue palette */
+  /* Primary — high-contrast white */
   --c-primary: rgba(255,255,255,0.97);
   --c-primary-bright: #ffffff;
   --c-primary-dim: rgba(255,255,255,0.72);
   --c-primary-muted: rgba(255,255,255,0.12);
   --c-primary-glow: rgba(255,255,255,0.30);
 
-  --c-accent: rgba(100,180,255,0.90);
-  --c-accent-bright: rgba(130,200,255,0.95);
-  --c-accent-muted: rgba(80,140,220,0.20);
+  /* Accent — steel silver */
+  --c-accent: rgba(180,190,205,0.95);
+  --c-accent-bright: rgba(210,218,230,0.97);
+  --c-accent-muted: rgba(140,150,170,0.18);
 
   --c-danger: rgba(220,80,80,0.90);
   --c-danger-bright: rgba(240,100,100,0.95);
@@ -353,9 +354,9 @@ DASHBOARD_HTML = """\
 
   --c-amber: rgba(240,200,100,0.90);
 
-  --text-1: rgba(255,255,255,0.95);
-  --text-2: rgba(255,255,255,0.72);
-  --text-3: rgba(255,255,255,0.45);
+  --text-1: rgba(255,255,255,0.97);
+  --text-2: rgba(255,255,255,0.65);
+  --text-3: rgba(255,255,255,0.40);
 
   --border: rgba(255,255,255,0.15);
   --border-active: rgba(255,255,255,0.35);
@@ -385,7 +386,7 @@ html, body {
 }
 
 body {
-  background: linear-gradient(180deg, #1a2438 0%, #3a4d68 50%, #6a8098 100%);
+  background: linear-gradient(180deg, #1a1d24 0%, #2a2e38 50%, #3d4350 100%);
   background-attachment: fixed;
   color: var(--text-1);
   font-family: var(--font-ui);
@@ -462,7 +463,7 @@ body {
   position: relative;
   background:
     linear-gradient(175deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 40%, rgba(0,0,0,0.10) 100%),
-    rgba(20,30,50,0.65);
+    rgba(24,26,32,0.70);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: var(--glass-border);
@@ -534,11 +535,11 @@ body {
   stroke-linecap: round;
 }
 .ring-center {
-  fill: rgba(8,10,18,0.9);
+  fill: rgba(12,13,16,0.9);
 }
 
 .ring-track {
-  stroke: rgba(30,80,80,0.25);
+  stroke: rgba(80,60,30,0.30);
 }
 .ring-track-danger {
   stroke: rgba(100,30,30,0.25);
@@ -667,10 +668,10 @@ body {
 }
 
 .badge-wait { color: var(--text-3); border-color: rgba(255,255,255,0.15); background: rgba(255,255,255,0.04); }
-.badge-run  { color: var(--c-accent); border-color: rgba(110,181,255,0.30); background: var(--c-accent-muted); animation: badge-pulse 2s ease-in-out infinite; box-shadow: 0 0 10px rgba(110,181,255,0.15); }
+.badge-run  { color: var(--c-accent); border-color: rgba(180,190,205,0.30); background: var(--c-accent-muted); animation: badge-pulse 2s ease-in-out infinite; box-shadow: 0 0 10px rgba(180,190,205,0.15); }
 .badge-pr   { color: var(--c-primary-dim); border-color: rgba(255,255,255,0.15); background: rgba(255,255,255,0.06); }
-.badge-rev  { color: var(--c-accent); border-color: rgba(110,181,255,0.20); animation: badge-pulse 2.5s ease-in-out infinite; }
-.badge-rvwd { color: var(--c-accent); border-color: rgba(110,181,255,0.25); background: var(--c-accent-muted); }
+.badge-rev  { color: var(--c-accent); border-color: rgba(180,190,205,0.20); animation: badge-pulse 2.5s ease-in-out infinite; }
+.badge-rvwd { color: var(--c-accent); border-color: rgba(180,190,205,0.25); background: var(--c-accent-muted); }
 .badge-ok   { color: var(--c-success); border-color: rgba(48,209,88,0.25); background: var(--c-success-muted); }
 .badge-aprv { color: var(--c-success-bright); border-color: rgba(48,209,88,0.35); background: var(--c-success-muted); animation: badge-pulse 1.5s ease-in-out infinite; box-shadow: 0 0 10px rgba(48,209,88,0.15); }
 .badge-gate { color: var(--c-amber); border-color: rgba(255,214,10,0.25); background: rgba(255,214,10,0.08); }
@@ -848,7 +849,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 }
 .modal-overlay.open { display: flex; }
 .modal {
-  background: rgba(20,25,35,0.85);
+  background: rgba(22,24,30,0.88);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
   border: var(--glass-border);
   border-radius: var(--radius-lg);
@@ -882,7 +883,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 }
 .edit-form textarea:focus, .edit-form select:focus, .edit-form input:focus {
   border-color: rgba(255,255,255,0.25);
-  box-shadow: 0 0 0 3px rgba(110,181,255,0.10);
+  box-shadow: 0 0 0 3px rgba(180,190,205,0.10);
 }
 .edit-form textarea { min-height: 80px; resize: vertical; }
 .edit-form select { width: auto; min-width: 100px; }
@@ -894,7 +895,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 .pipeline-count .cnt { font-weight: 700; min-width: 20px; font-variant-numeric: tabular-nums; }
 .pipeline-count .lbl { color: var(--text-3); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
 .new-row { animation: row-flash 1s ease-out; }
-@keyframes row-flash { from { background: rgba(110,181,255,0.12); } to { background: transparent; } }
+@keyframes row-flash { from { background: rgba(180,190,205,0.12); } to { background: transparent; } }
 
 /* Glass filter bar */
 .filter-bar { display: flex; gap: var(--s-xs); align-items: center; }
@@ -907,9 +908,9 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
   color: var(--text-3); cursor: pointer; transition: all 0.15s ease; outline: none;
 }
 .filter-btn:hover { color: var(--text-1); border-color: rgba(255,255,255,0.20); background: rgba(255,255,255,0.08); }
-.filter-btn.active { color: var(--c-accent); border-color: rgba(110,181,255,0.30); background: var(--c-accent-muted); }
+.filter-btn.active { color: var(--c-accent); border-color: rgba(180,190,205,0.30); background: var(--c-accent-muted); }
 .filter-btn.active-fail { color: var(--c-danger); border-color: rgba(255,69,58,0.30); background: var(--c-danger-muted); }
-.filter-btn.active-run { color: var(--c-accent-bright); border-color: rgba(110,181,255,0.35); background: var(--c-accent-muted); box-shadow: 0 0 8px rgba(110,181,255,0.12); }
+.filter-btn.active-run { color: var(--c-accent-bright); border-color: rgba(180,190,205,0.35); background: var(--c-accent-muted); box-shadow: 0 0 8px rgba(180,190,205,0.12); }
 .filter-btn.active-wait { color: var(--c-amber); border-color: rgba(255,214,10,0.25); background: rgba(255,214,10,0.08); }
 .filter-sep { width: 1px; height: 16px; background: rgba(255,255,255,0.10); margin: 0 var(--s-xs); border-radius: 1px; }
 
@@ -933,7 +934,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 }
 .inline-edit textarea:focus, .inline-edit select:focus, .inline-edit input:focus {
   border-color: rgba(255,255,255,0.25);
-  box-shadow: 0 0 0 3px rgba(110,181,255,0.10);
+  box-shadow: 0 0 0 3px rgba(180,190,205,0.10);
 }
 .inline-edit textarea { min-height: 100px; resize: vertical; }
 .inline-edit select { width: auto; min-width: 100px; }
@@ -943,7 +944,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 /* Glass progress bar */
 .progress-bar { height: 4px; background: rgba(255,255,255,0.06); margin-top: 8px; overflow: hidden; border-radius: 2px; }
 .progress-fill { height: 100%; transition: width 0.6s ease; border-radius: 2px; }
-.progress-fill.green { background: linear-gradient(90deg, var(--c-accent), var(--c-accent-bright)); }
+.progress-fill.green { background: linear-gradient(90deg, var(--c-amber), #ffc857); }
 .progress-fill.red { background: linear-gradient(90deg, var(--c-danger), var(--c-danger-bright)); }
 
 /* Glass bar chart */
@@ -965,9 +966,9 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
   border: 0.5px solid rgba(255,255,255,0.08);
 }
 .stage-node.active {
-  border-color: rgba(80,110,160,0.4);
+  border-color: rgba(160,168,180,0.4);
   color: var(--text-1);
-  background: rgba(80,110,160,0.2);
+  background: rgba(160,168,180,0.2);
 }
 .stage-node.has-tasks {
   border-color: rgba(255,255,255,0.12);
@@ -1070,7 +1071,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
     radial-gradient(ellipse 70% 60% at 35% 35%, rgba(60,140,180,0.60) 0%, rgba(35,80,120,0.65) 40%, rgba(15,30,50,0.88) 100%);
   box-shadow:
     inset -6px -8px 18px rgba(0,0,0,0.35),
-    inset 4px 4px 10px rgba(100,200,255,0.20),
+    inset 4px 4px 10px rgba(180,190,205,0.15),
     0 0 25px rgba(60,180,220,0.30),
     0 2px 8px rgba(0,0,0,0.25);
 }
@@ -1209,9 +1210,9 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
         <svg width="0" height="0" style="position:absolute">
           <defs>
             <linearGradient id="ring-grad-success" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="rgba(80,190,185,0.95)" />
-              <stop offset="40%" stop-color="rgba(35,125,125,0.9)" />
-              <stop offset="100%" stop-color="rgba(15,70,70,0.8)" />
+              <stop offset="0%" stop-color="rgba(230,160,50,0.95)" />
+              <stop offset="40%" stop-color="rgba(180,110,25,0.9)" />
+              <stop offset="100%" stop-color="rgba(120,65,10,0.8)" />
             </linearGradient>
             <linearGradient id="ring-grad-danger" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0%" stop-color="rgba(200,70,70,0.95)" />

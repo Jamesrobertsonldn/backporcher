@@ -25,12 +25,12 @@ GitHub Issue (label: backporcher)
 
 The worker daemon (`src/worker.py`) runs up to 6 async loops via `asyncio.gather()`:
 
-1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `backporcher`, deduplicates (including failed tasks), batch-orchestrates 2+ issues per repo (assigns priorities, dependencies, models via haiku), creates tasks, claims issues with `backporcher-in-progress` label
+1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `backporcher`, deduplicates (including failed tasks, excludes completed no-op tasks with no PR), batch-orchestrates 2+ issues per repo (assigns priorities, dependencies, models via haiku), creates tasks, claims issues with `backporcher-in-progress` label
 2. **Task Executor** (every 5s) — claims queued tasks (bounded by semaphore), syncs credentials, runs `claude -p` in isolated worktrees, optionally runs build verification, creates PRs. Auto-retries transient failures (auth, permissions, stale branches)
 3. **Coordinator Reviewer** (every 15s) — reviews each PR diff via `claude -p`, checks for conflicts with other open PRs, approves or rejects. Backfills missing `pr_number` from `pr_url`
 4. **CI Monitor** (every 60s) — checks CI status on approved PRs, auto-merges passing PRs (squash), auto-retries failures with CI log context, closes GitHub issues on success
 5. **Artifact Cleanup** (every 5 min) — removes worktrees and remote branches for terminal tasks older than 10 minutes
-6. **Dashboard** (optional) — aiohttp web server with HTTP Basic Auth, real-time SSE updates every 5s. Tactical data interface theme: cyan-dominant, corner-bracketed panels, Share Tech Mono + Rajdhani typography, scan-line overlay, pulsing badges for active states. Only starts when `BACKPORCHER_DASHBOARD_PASSWORD` is set. Features: inline Approve/Hold/Reject/Escalate/Re-queue buttons, task detail panel with timeline, edit modal for prompt/model/priority rewriting, pipeline summary with metrics (merged count, success rate, avg time, retry rate), global Pause/Resume toggle. API: `POST /api/tasks/{id}/approve|hold|reject|edit|requeue|escalate`, `POST /api/pause|resume`, `GET /api/stats`
+6. **Dashboard** (optional) — aiohttp web server with HTTP Basic Auth, real-time SSE updates every 5s. Steel glass theme: high-contrast steel gray, translucent panels with backdrop blur, SF Pro + system font typography, pulsing badges for active states, orange success ring gauges. Only starts when `BACKPORCHER_DASHBOARD_PASSWORD` is set. Features: inline Approve/Hold/Reject/Escalate/Re-queue buttons, task detail panel with timeline, edit modal for prompt/model/priority rewriting, pipeline summary with metrics (merged count, success rate, avg time, retry rate), global Pause/Resume toggle. API: `POST /api/tasks/{id}/approve|hold|reject|edit|requeue|escalate`, `POST /api/pause|resume`, `GET /api/stats`
 
 ## Task Status Flow
 
@@ -70,8 +70,8 @@ Controls how much human oversight the pipeline requires. Set via `BACKPORCHER_AP
 |------|---------|
 | `src/cli.py` | CLI entry point: `fleet`, `status`, `stats`, `cancel`, `cleanup`, `approve`, `hold`, `release`, `pause`, `resume`, `repo`, `worker` |
 | `src/worker.py` | Background daemon — 6 async loops, graceful shutdown, startup recovery, preflight checks |
-| `src/dashboard.py` | aiohttp web dashboard: HTTP Basic Auth, SSE real-time updates, JSON API, tactical data interface theme (cyan/corner-bracketed), task control (approve/hold/reject/edit/requeue/escalate) |
-| `backporcher-theme.css` | CSS design tokens and classes for the tactical dashboard theme (reference file — inlined in dashboard.py) |
+| `src/dashboard.py` | aiohttp web dashboard: HTTP Basic Auth, SSE real-time updates, JSON API, steel glass theme (high-contrast gray), task control (approve/hold/reject/edit/requeue/escalate) |
+| `backporcher-theme.css` | CSS design tokens and classes for the steel gray dashboard theme (reference file — inlined in dashboard.py) |
 | `src/dispatcher.py` | Worktree setup, credential sync, agent execution, build verification, PR creation, coordinator review runner, CI retry, transient failure auto-retry |
 | `src/db.py` | SQLite with WAL mode, schema migrations (v1→v7), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
 | `src/notifications.py` | Webhook notifications (Slack/Discord compatible), fire-and-forget with 5s timeout |
@@ -150,7 +150,7 @@ Only issues created by users in `BACKPORCHER_ALLOWED_USERS` are picked up. Preve
 3. **Credential auto-sync** — Before each dispatch, compares admin vs agent credential file mtimes. If admin's are newer, auto-copies to agent user.
 4. **Agent failure auto-retry** — Any non-zero agent exit code triggers re-queue with model escalation (sonnet → opus), up to `max_task_retries` (default 3). Stale branches are cleaned up idempotently before each dispatch.
 5. **PR number backfill** — If `pr_number` is NULL but `pr_url` exists, the coordinator extracts it automatically. Never blocks on missing data.
-6. **Startup preflight** — Verifies agent user can access repos directory and syncs credentials before entering poll loops.
+6. **Startup preflight** — Clones or fetches all registered repos, verifies agent user can access repos directory, and syncs credentials before entering poll loops.
 7. **Dependency failure cascade** — When a task fails, all queued tasks that depend on it (and their dependents) are automatically marked as failed.
 8. **Terminal state label sync** — All failure paths (agent, verify, CI, coordinator, exceptions) update GitHub issue labels to `backporcher-failed`. No more stale `backporcher-in-progress` labels on finished issues.
 9. **Automatic artifact cleanup** — Worktrees and remote branches are deleted on every terminal state (completed, failed, cancelled). A periodic cleanup loop (every 5 min) catches any stragglers older than 10 minutes.
