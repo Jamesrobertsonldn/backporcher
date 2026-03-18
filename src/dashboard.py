@@ -225,6 +225,10 @@ async def _build_status(db: Database) -> dict:
     # Count held tasks
     held_count = sum(1 for row in rows if row.get("hold"))
 
+    # All registered repo names (so repos with 0 tasks still show)
+    all_repos = await db.list_repos()
+    repo_names = [r["name"] for r in all_repos]
+
     return {
         "counts": counts,
         "repo_counts": repo_counts,
@@ -232,12 +236,16 @@ async def _build_status(db: Database) -> dict:
         "timestamp": now.isoformat(),
         "queue_paused": queue_paused,
         "held_count": held_count,
+        "repo_names": repo_names,
     }
 
 
 async def index_handler(request: web.Request) -> web.Response:
     """Serve the main dashboard HTML page."""
-    return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+    return web.Response(
+        text=DASHBOARD_HTML, content_type="text/html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+    )
 
 
 async def status_handler(request: web.Request) -> web.Response:
@@ -312,55 +320,83 @@ DASHBOARD_HTML = """\
 <title>Backporcher Dashboard</title>
 <style>
 /* ═══════════════════════════════════════════════════════
-   BACKPORCHER — Steel Glass Theme
-   Translucent panels, backdrop blur, high-contrast steel gray
+   BACKPORCHER — Warm Light Theme
+   Cream base, dark type, warm accent palette
    ═══════════════════════════════════════════════════════ */
 
 :root {
-  /* Surface — steel gray base */
-  --bg-base: #1a1d24;
-  --bg-surface: rgba(255,255,255,0.10);
-  --bg-elevated: rgba(255,255,255,0.16);
-  --bg-overlay: rgba(0,0,0,0.60);
+  /* Surface — warm cream/beige */
+  --bg-base: #F5F5DC;
+  --bg-surface: rgba(0,0,0,0.04);
+  --bg-elevated: rgba(0,0,0,0.07);
+  --bg-overlay: rgba(0,0,0,0.45);
 
-  /* Glass — flat, premium */
+  /* Glass — light panels */
   --glass-blur: 14px;
-  --glass-border: 0.5px solid rgba(255,255,255,0.13);
-  --glass-shadow: inset 0 0.5px 0 rgba(255,255,255,0.16);
-  --glass-shadow-lg: inset 0 0.5px 0 rgba(255,255,255,0.16);
-  --glass-texture-bg: rgba(255,255,255,0.06);
+  --glass-border: 0.5px solid rgba(0,0,0,0.10);
+  --glass-shadow: inset 0 0.5px 0 rgba(255,255,255,0.60);
+  --glass-shadow-lg: inset 0 0.5px 0 rgba(255,255,255,0.60);
+  --glass-texture-bg: rgba(0,0,0,0.03);
   --glass-texture-blur: 2px;
 
-  /* Primary — high-contrast white */
-  --c-primary: rgba(255,255,255,0.97);
-  --c-primary-bright: #ffffff;
-  --c-primary-dim: rgba(255,255,255,0.72);
-  --c-primary-muted: rgba(255,255,255,0.12);
-  --c-primary-glow: rgba(255,255,255,0.30);
+  /* Primary — dark text */
+  --c-primary: rgba(0,0,0,0.85);
+  --c-primary-bright: #1a1a1a;
+  --c-primary-dim: rgba(0,0,0,0.55);
+  --c-primary-muted: rgba(0,0,0,0.06);
+  --c-primary-glow: rgba(0,0,0,0.12);
 
-  /* Accent — steel silver */
-  --c-accent: rgba(180,190,205,0.95);
-  --c-accent-bright: rgba(210,218,230,0.97);
-  --c-accent-muted: rgba(140,150,170,0.18);
+  /* Accent — warm neutral */
+  --c-accent: rgba(80,70,60,0.85);
+  --c-accent-bright: rgba(60,50,40,0.95);
+  --c-accent-muted: rgba(80,70,60,0.08);
 
-  --c-danger: rgba(220,80,80,0.90);
-  --c-danger-bright: rgba(240,100,100,0.95);
-  --c-danger-muted: rgba(180,50,50,0.20);
+  /* Fail — sienna brown */
+  --c-danger: #A0522D;
+  --c-danger-bright: #B8623A;
+  --c-danger-muted: rgba(160,82,45,0.12);
 
-  --c-success: rgba(80,200,160,0.90);
-  --c-success-bright: rgba(100,220,180,0.95);
-  --c-success-dim: rgba(60,180,140,0.75);
-  --c-success-muted: rgba(40,160,120,0.20);
+  /* Success — warm red-orange */
+  --c-success: #E35336;
+  --c-success-bright: #F06040;
+  --c-success-dim: #C44830;
+  --c-success-muted: rgba(227,83,54,0.12);
 
-  --c-amber: rgba(240,200,100,0.90);
+  --c-amber: #A0522D;
+  --c-blue: #E35336;
+  --c-blue-bright: #F06040;
+  --c-blue-muted: rgba(227,83,54,0.12);
 
-  --text-1: rgba(255,255,255,0.97);
-  --text-2: rgba(255,255,255,0.65);
-  --text-3: rgba(255,255,255,0.40);
+  --text-1: rgba(0,0,0,0.87);
+  --text-2: rgba(0,0,0,0.55);
+  --text-3: rgba(0,0,0,0.35);
 
-  --border: rgba(255,255,255,0.15);
-  --border-active: rgba(255,255,255,0.35);
-  --border-subtle: rgba(255,255,255,0.08);
+  --border: rgba(0,0,0,0.12);
+  --border-active: rgba(0,0,0,0.25);
+  --border-subtle: rgba(0,0,0,0.06);
+
+  /* Semantic tokens — everything references these */
+  --badge-bg: rgba(0,0,0,0.04);
+  --badge-border: rgba(0,0,0,0.12);
+  --panel-bg: rgba(255,255,255,0.65);
+  --panel-border-top: rgba(255,255,255,0.80);
+  --panel-inset: rgba(255,255,255,0.50);
+  --panel-shadow: rgba(0,0,0,0.08);
+  --panel-shadow-lg: rgba(0,0,0,0.04);
+  --header-bg: rgba(255,255,255,0.70);
+  --hover-bg: rgba(0,0,0,0.04);
+  --selected-bg: rgba(0,0,0,0.05);
+  --input-bg: rgba(0,0,0,0.04);
+  --input-focus-ring: rgba(0,0,0,0.08);
+  --modal-bg: rgba(245,245,220,0.92);
+  --scrollbar-thumb: rgba(0,0,0,0.15);
+  --scrollbar-thumb-hover: rgba(0,0,0,0.25);
+  --row-flash: rgba(227,83,54,0.08);
+  --glow-color: rgba(0,0,0,0.06);
+  --ring-center: rgba(245,245,220,0.95);
+  --ring-track-success: rgba(227,83,54,0.15);
+  --ring-track-danger: rgba(160,82,45,0.15);
+  --orb-glow-idle: rgba(0,0,0,0.06);
 
   --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
   --font-mono: 'SF Mono', ui-monospace, 'JetBrains Mono', 'Cascadia Code', monospace;
@@ -378,7 +414,7 @@ DASHBOARD_HTML = """\
   --radius-pill: 100px;
 }
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
 
 html, body {
   height: 100%;
@@ -386,8 +422,7 @@ html, body {
 }
 
 body {
-  background: linear-gradient(180deg, #1a1d24 0%, #2a2e38 50%, #3d4350 100%);
-  background-attachment: fixed;
+  background: #F5F5DC;
   color: var(--text-1);
   font-family: var(--font-ui);
   font-size: 13px;
@@ -405,11 +440,11 @@ body {
   justify-content: space-between;
   height: 56px;
   padding: 0 var(--s-xl);
-  background: rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.70);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border-bottom: var(--glass-border);
-  box-shadow: var(--glass-shadow);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 
 .header-title {
@@ -461,18 +496,16 @@ body {
 
 .panel {
   position: relative;
-  background:
-    linear-gradient(175deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.04) 40%, rgba(0,0,0,0.10) 100%),
-    rgba(24,26,32,0.70);
+  background: rgba(255,255,255,0.65);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: var(--glass-border);
-  border-top: 0.5px solid rgba(255,255,255,0.08);
+  border-top: 0.5px solid rgba(255,255,255,0.80);
   border-radius: var(--radius-lg);
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.04),
-    0 1px 3px rgba(0,0,0,0.3),
-    0 4px 12px rgba(0,0,0,0.15);
+    inset 0 1px 0 rgba(255,255,255,0.50),
+    0 1px 3px rgba(0,0,0,0.08),
+    0 4px 12px rgba(0,0,0,0.04);
   padding: var(--s-lg) var(--s-xl);
   display: flex;
   flex-direction: column;
@@ -535,14 +568,14 @@ body {
   stroke-linecap: round;
 }
 .ring-center {
-  fill: rgba(12,13,16,0.9);
+  fill: var(--ring-center);
 }
 
 .ring-track {
-  stroke: rgba(80,60,30,0.30);
+  stroke: var(--ring-track-success);
 }
 .ring-track-danger {
-  stroke: rgba(100,30,30,0.25);
+  stroke: var(--ring-track-danger);
 }
 
 .ring-fill {
@@ -626,10 +659,14 @@ body {
   padding: var(--s-sm) var(--s-md);
   border-bottom: 1px solid var(--border-subtle);
 }
+.fleet-table thead th.sortable { cursor: pointer; user-select: none; transition: color 0.15s ease; }
+.fleet-table thead th.sortable:hover { color: var(--text-1); }
+.fleet-table thead th.sort-active { color: var(--text-1); text-decoration: underline; text-underline-offset: 3px; }
+.fleet-table thead th .sort-arrow { font-size: 8px; margin-left: 3px; }
 
 .fleet-table tbody td {
   font-size: 12px;
-  padding: 10px var(--s-md);
+  padding: 28px var(--s-md);
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }
@@ -639,10 +676,10 @@ body {
   border-radius: var(--radius-sm);
 }
 
-.fleet-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+.fleet-table tbody tr:hover { background: rgba(0,0,0,0.04); }
 
 .fleet-table tbody tr.selected {
-  background: rgba(255,255,255,0.04);
+  background: rgba(0,0,0,0.05);
   box-shadow: inset 3px 0 0 var(--c-accent);
 }
 
@@ -667,18 +704,18 @@ body {
   backdrop-filter: blur(2px);
 }
 
-.badge-wait { color: var(--text-3); border-color: rgba(255,255,255,0.15); background: rgba(255,255,255,0.04); }
-.badge-run  { color: var(--c-accent); border-color: rgba(180,190,205,0.30); background: var(--c-accent-muted); animation: badge-pulse 2s ease-in-out infinite; box-shadow: 0 0 10px rgba(180,190,205,0.15); }
-.badge-pr   { color: var(--c-primary-dim); border-color: rgba(255,255,255,0.15); background: rgba(255,255,255,0.06); }
-.badge-rev  { color: var(--c-accent); border-color: rgba(180,190,205,0.20); animation: badge-pulse 2.5s ease-in-out infinite; }
-.badge-rvwd { color: var(--c-accent); border-color: rgba(180,190,205,0.25); background: var(--c-accent-muted); }
-.badge-ok   { color: var(--c-success); border-color: rgba(48,209,88,0.25); background: var(--c-success-muted); }
-.badge-aprv { color: var(--c-success-bright); border-color: rgba(48,209,88,0.35); background: var(--c-success-muted); animation: badge-pulse 1.5s ease-in-out infinite; box-shadow: 0 0 10px rgba(48,209,88,0.15); }
-.badge-gate { color: var(--c-amber); border-color: rgba(255,214,10,0.25); background: rgba(255,214,10,0.08); }
-.badge-hold { color: var(--text-2); border-color: rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); }
-.badge-rty  { color: var(--c-amber); border-color: rgba(255,214,10,0.25); background: rgba(255,214,10,0.08); animation: badge-pulse 1s ease-in-out infinite; }
-.badge-done { color: var(--text-3); border-color: rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); }
-.badge-fail { color: var(--c-danger); border-color: rgba(255,69,58,0.30); background: var(--c-danger-muted); }
+.badge-wait { color: var(--text-3); border-color: var(--badge-border); background: var(--badge-bg); }
+.badge-run  { color: var(--text-1); border-color: var(--border-active); background: var(--selected-bg); animation: badge-pulse 2s ease-in-out infinite; }
+.badge-pr   { color: var(--text-2); border-color: var(--badge-border); background: var(--badge-bg); }
+.badge-rev  { color: var(--text-2); border-color: var(--badge-border); animation: badge-pulse 2.5s ease-in-out infinite; }
+.badge-rvwd { color: var(--text-1); border-color: var(--border-active); background: var(--selected-bg); }
+.badge-ok   { color: var(--c-success); border-color: var(--c-success); background: var(--c-success-muted); }
+.badge-aprv { color: var(--c-success); border-color: var(--c-success); background: var(--c-success-muted); animation: badge-pulse 1.5s ease-in-out infinite; }
+.badge-gate { color: var(--c-danger); border-color: var(--c-danger); background: var(--c-danger-muted); }
+.badge-hold { color: var(--text-2); border-color: var(--badge-border); background: var(--badge-bg); }
+.badge-rty  { color: var(--c-danger); border-color: var(--c-danger); background: var(--c-danger-muted); animation: badge-pulse 1s ease-in-out infinite; }
+.badge-done { color: var(--text-3); border-color: var(--border-subtle); background: var(--badge-bg); }
+.badge-fail { color: var(--c-danger); border-color: var(--c-danger); background: var(--c-danger-muted); }
 .badge-cxl  { color: var(--text-3); text-decoration: line-through; }
 
 @keyframes badge-pulse {
@@ -697,8 +734,7 @@ body {
   padding: 6px 16px;
   border: 0.75px solid;
   border-radius: var(--radius-pill);
-  background: rgba(255,255,255,0.06);
-  backdrop-filter: blur(2px);
+  background: var(--badge-bg);
   cursor: pointer;
   transition: all 0.2s ease;
   outline: none;
@@ -706,23 +742,23 @@ body {
 
 .btn:active { transform: scale(0.96); }
 
-.btn-approve { border-color: rgba(48,209,88,0.35); color: var(--c-success); }
-.btn-approve:hover { background: var(--c-success); color: #000; box-shadow: 0 0 16px rgba(48,209,88,0.25), var(--glass-shadow); }
+.btn-approve { border-color: var(--c-success); color: var(--c-success); }
+.btn-approve:hover { background: var(--c-success); color: #fff; }
 
-.btn-hold { border-color: rgba(255,255,255,0.15); color: var(--text-2); }
-.btn-hold:hover { background: rgba(255,255,255,0.15); color: var(--text-1); box-shadow: var(--glass-shadow); }
+.btn-hold { border-color: var(--badge-border); color: var(--text-2); }
+.btn-hold:hover { background: var(--selected-bg); color: var(--text-1); }
 
-.btn-reject { border-color: rgba(255,69,58,0.35); color: var(--c-danger); }
-.btn-reject:hover { background: var(--c-danger); color: #fff; box-shadow: 0 0 16px rgba(255,69,58,0.25), var(--glass-shadow); }
+.btn-reject { border-color: var(--c-danger); color: var(--c-danger); }
+.btn-reject:hover { background: var(--c-danger); color: #fff; }
 
 .btn-ghost { border-color: transparent; color: var(--text-2); background: transparent; }
-.btn-ghost:hover { color: var(--text-1); background: rgba(255,255,255,0.06); }
+.btn-ghost:hover { color: var(--text-1); background: var(--hover-bg); }
 
-.btn-pause { border-color: rgba(255,69,58,0.30); color: var(--c-danger); }
-.btn-pause:hover { background: var(--c-danger); color: #fff; box-shadow: var(--glass-shadow); }
+.btn-pause { border-color: var(--c-danger); color: var(--c-danger); }
+.btn-pause:hover { background: var(--c-danger); color: #fff; }
 
-.btn-resume { border-color: rgba(48,209,88,0.30); color: var(--c-success); }
-.btn-resume:hover { background: var(--c-success); color: #000; box-shadow: var(--glass-shadow); }
+.btn-resume { border-color: var(--c-success); color: var(--c-success); }
+.btn-resume:hover { background: var(--c-success); color: #fff; }
 
 .btn-group { display: flex; gap: var(--s-sm); flex-wrap: wrap; }
 
@@ -818,8 +854,8 @@ body {
 /* Glass scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 .text-primary { color: var(--text-1); }
 .text-secondary { color: var(--text-2); }
@@ -831,7 +867,7 @@ body {
 .uppercase { text-transform: uppercase; letter-spacing: 0.04em; }
 .mono { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 .display { font-family: var(--font-ui); }
-.glow { text-shadow: 0 0 12px rgba(255,255,255,0.20); }
+.glow { text-shadow: 0 0 12px var(--glow-color); }
 
 /* Additional styles */
 a { color: var(--c-accent); text-decoration: none; }
@@ -849,7 +885,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 }
 .modal-overlay.open { display: flex; }
 .modal {
-  background: rgba(22,24,30,0.88);
+  background: var(--modal-bg);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
   border: var(--glass-border);
   border-radius: var(--radius-lg);
@@ -861,12 +897,12 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 .modal .panel-corners::after { content: none; }
 .modal-close {
   position: absolute; top: var(--s-lg); right: var(--s-lg);
-  background: rgba(255,255,255,0.08); border: none; color: var(--text-2);
+  background: var(--hover-bg); border: none; color: var(--text-2);
   width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
   font-size: 14px; cursor: pointer; font-family: var(--font-ui);
   transition: all 0.15s ease;
 }
-.modal-close:hover { color: var(--text-1); background: rgba(255,255,255,0.15); }
+.modal-close:hover { color: var(--text-1); background: var(--selected-bg); }
 
 /* Glass forms */
 .edit-form { margin-top: var(--s-md); }
@@ -876,14 +912,14 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
   margin-bottom: var(--s-xs); margin-top: var(--s-lg);
 }
 .edit-form textarea, .edit-form select, .edit-form input {
-  width: 100%; background: rgba(255,255,255,0.06); border: var(--glass-border);
+  width: 100%; background: var(--input-bg); border: var(--glass-border);
   border-radius: var(--radius-sm);
   color: var(--text-1); padding: 10px var(--s-md); font-family: var(--font-mono);
   font-size: 12px; outline: none; transition: border-color 0.15s ease;
 }
 .edit-form textarea:focus, .edit-form select:focus, .edit-form input:focus {
-  border-color: rgba(255,255,255,0.25);
-  box-shadow: 0 0 0 3px rgba(180,190,205,0.10);
+  border-color: var(--border-active);
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
 }
 .edit-form textarea { min-height: 80px; resize: vertical; }
 .edit-form select { width: auto; min-width: 100px; }
@@ -895,30 +931,31 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 .pipeline-count .cnt { font-weight: 700; min-width: 20px; font-variant-numeric: tabular-nums; }
 .pipeline-count .lbl { color: var(--text-3); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
 .new-row { animation: row-flash 1s ease-out; }
-@keyframes row-flash { from { background: rgba(180,190,205,0.12); } to { background: transparent; } }
+@keyframes row-flash { from { background: var(--row-flash); } to { background: transparent; } }
 
 /* Glass filter bar */
-.filter-bar { display: flex; gap: var(--s-xs); align-items: center; }
+.filter-bar { display: flex; gap: var(--s-xs); align-items: center; margin-left: var(--s-lg); overflow-x: auto; overflow-y: hidden; flex-shrink: 1; min-width: 0; scrollbar-width: none; -ms-overflow-style: none; }
+.filter-bar::-webkit-scrollbar { display: none; }
 .filter-btn {
   font-family: var(--font-ui); font-size: 10px; font-weight: 600;
   letter-spacing: 0.03em; text-transform: uppercase;
-  padding: 4px 12px; border: 0.75px solid rgba(255,255,255,0.10);
+  padding: 4px 12px; border: 0.75px solid var(--badge-border);
   border-radius: var(--radius-pill);
-  background: rgba(255,255,255,0.04);
-  color: var(--text-3); cursor: pointer; transition: all 0.15s ease; outline: none;
+  background: var(--badge-bg);
+  color: var(--text-3); cursor: pointer; transition: all 0.15s ease; outline: none; flex-shrink: 0; white-space: nowrap;
 }
-.filter-btn:hover { color: var(--text-1); border-color: rgba(255,255,255,0.20); background: rgba(255,255,255,0.08); }
-.filter-btn.active { color: var(--c-accent); border-color: rgba(180,190,205,0.30); background: var(--c-accent-muted); }
-.filter-btn.active-fail { color: var(--c-danger); border-color: rgba(255,69,58,0.30); background: var(--c-danger-muted); }
-.filter-btn.active-run { color: var(--c-accent-bright); border-color: rgba(180,190,205,0.35); background: var(--c-accent-muted); box-shadow: 0 0 8px rgba(180,190,205,0.12); }
-.filter-btn.active-wait { color: var(--c-amber); border-color: rgba(255,214,10,0.25); background: rgba(255,214,10,0.08); }
-.filter-sep { width: 1px; height: 16px; background: rgba(255,255,255,0.10); margin: 0 var(--s-xs); border-radius: 1px; }
+.filter-btn:hover { color: var(--text-1); border-color: var(--border-active); background: var(--hover-bg); }
+.filter-btn.active { color: var(--text-1); border-color: var(--border-active); background: var(--selected-bg); }
+.filter-btn.active-fail { color: var(--c-danger); border-color: var(--c-danger); background: var(--c-danger-muted); }
+.filter-btn.active-run { color: var(--text-1); border-color: var(--border-active); background: var(--selected-bg); }
+.filter-btn.active-wait { color: var(--c-danger); border-color: var(--c-danger); background: var(--c-danger-muted); }
+.filter-sep { width: 1px; height: 16px; background: var(--badge-border); margin: 0 var(--s-xs); border-radius: 1px; flex-shrink: 0; }
 
 /* Glass inline edit */
 .inline-edit {
   margin-top: var(--s-md); padding: var(--s-lg);
   border: var(--glass-border); border-radius: var(--radius-md);
-  background: rgba(255,255,255,0.04);
+  background: var(--badge-bg);
 }
 .inline-edit label {
   display: block; font-family: var(--font-ui); font-size: 10px;
@@ -927,14 +964,14 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 }
 .inline-edit label:first-child { margin-top: 0; }
 .inline-edit textarea, .inline-edit select, .inline-edit input[type=number] {
-  width: 100%; background: rgba(0,0,0,0.25); border: var(--glass-border);
+  width: 100%; background: var(--input-bg); border: var(--glass-border);
   border-radius: var(--radius-sm);
   color: var(--text-1); padding: 10px var(--s-md); font-family: var(--font-mono);
   font-size: 12px; outline: none;
 }
 .inline-edit textarea:focus, .inline-edit select:focus, .inline-edit input:focus {
-  border-color: rgba(255,255,255,0.25);
-  box-shadow: 0 0 0 3px rgba(180,190,205,0.10);
+  border-color: var(--border-active);
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
 }
 .inline-edit textarea { min-height: 100px; resize: vertical; }
 .inline-edit select { width: auto; min-width: 100px; }
@@ -942,17 +979,31 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 .fleet-count { font-size: 10px; color: var(--text-3); margin-left: var(--s-sm); font-variant-numeric: tabular-nums; }
 
 /* Glass progress bar */
-.progress-bar { height: 4px; background: rgba(255,255,255,0.06); margin-top: 8px; overflow: hidden; border-radius: 2px; }
+.progress-bar { height: 4px; background: var(--badge-bg); margin-top: 8px; overflow: hidden; border-radius: 2px; }
 .progress-fill { height: 100%; transition: width 0.6s ease; border-radius: 2px; }
-.progress-fill.green { background: linear-gradient(90deg, var(--c-amber), #ffc857); }
+.progress-fill.green { background: linear-gradient(90deg, var(--c-blue), var(--c-blue-bright)); }
 .progress-fill.red { background: linear-gradient(90deg, var(--c-danger), var(--c-danger-bright)); }
 
-/* Glass bar chart */
-.bar-chart { display: flex; align-items: flex-end; gap: 4px; height: 40px; margin-top: auto; margin-bottom: auto; }
-.bar-col { display: flex; flex-direction: column; align-items: center; flex: 1; gap: 2px; }
-.bar-fill { width: 100%; min-width: 16px; max-width: 48px; border-radius: 3px 3px 0 0; background: var(--c-accent); transition: height 0.4s ease; opacity: 0.6; }
-.bar-fill.fail-portion { background: var(--c-danger); opacity: 0.8; }
-.bar-label { font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60px; }
+/* Repo ring gauges — scrollable row, identical to metric rings */
+.repo-rings-wrap {
+  position: relative; flex: 1; min-height: 0; margin-top: auto; margin-bottom: auto; overflow: hidden;
+}
+.repo-rings-wrap::before, .repo-rings-wrap::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 48px; z-index: 1; pointer-events: none;
+}
+.repo-rings-wrap::before { left: 0; background: linear-gradient(90deg, var(--panel-bg) 0%, var(--panel-bg) 20%, transparent 100%); }
+.repo-rings-wrap::after  { right: 0; background: linear-gradient(270deg, var(--panel-bg) 0%, var(--panel-bg) 20%, transparent 100%); }
+.repo-rings {
+  display: flex; gap: var(--s-md); align-items: flex-start;
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; -ms-overflow-style: none;
+  scroll-snap-type: x mandatory;
+  padding: var(--s-xs) var(--s-xl);
+}
+.repo-rings::-webkit-scrollbar { display: none; }
+.repo-ring {
+  flex: 0 0 auto; scroll-snap-align: center;
+}
 
 /* Pipeline stage counters — circles per Figma */
 .stage-flow { display: flex; align-items: center; gap: 8px; padding: var(--s-sm) 0; justify-content: flex-start; }
@@ -962,18 +1013,18 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
   display: flex; align-items: center; justify-content: center;
   font-family: var(--font-ui); font-size: 12px; font-weight: 700;
   color: var(--text-3); position: relative; transition: all 0.3s ease;
-  background: rgba(255,255,255,0.06);
-  border: 0.5px solid rgba(255,255,255,0.08);
+  background: var(--badge-bg);
+  border: 0.5px solid var(--border-subtle);
 }
 .stage-node.active {
-  border-color: rgba(160,168,180,0.4);
+  border-color: var(--border-active);
   color: var(--text-1);
-  background: rgba(160,168,180,0.2);
+  background: var(--selected-bg);
 }
 .stage-node.has-tasks {
-  border-color: rgba(255,255,255,0.12);
+  border-color: var(--badge-border);
   color: var(--text-1);
-  background: rgba(255,255,255,0.08);
+  background: var(--hover-bg);
 }
 .stage-arrow { display: none; }
 .stage-label { font-size: 10px; color: var(--text-3); text-align: center; margin-top: 4px; letter-spacing: 0.02em; }
@@ -983,8 +1034,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 .agent-viz {
   display: flex; gap: 14px; justify-content: flex-start;
   padding: var(--s-md) var(--s-sm); min-height: 80px;
-  background: rgba(15,25,45,0.40);
-  border-radius: var(--radius-md);
+  background: transparent;
   margin: 0 calc(-1 * var(--s-sm));
 }
 .agent-slot { display: flex; flex-direction: column; align-items: center; }
@@ -998,82 +1048,83 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 .agent-orb .orb-glow {
   position: absolute; inset: -10px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(100,160,220,0.30) 0%, transparent 65%);
+  background: radial-gradient(circle, rgba(0,0,0,0.08) 0%, transparent 65%);
 }
 
-/* Main sphere — translucent dark glass, light upper-left, deep shadow bottom-right */
+/* Main sphere — warm glass on light background */
 .agent-orb .orb-shell {
   position: absolute; inset: 0;
   border-radius: 50%;
   background:
-    radial-gradient(ellipse 70% 60% at 35% 35%, rgba(100,130,180,0.55) 0%, rgba(60,80,120,0.6) 40%, rgba(25,35,55,0.88) 100%);
-  border: 0.5px solid rgba(140,170,220,0.35);
+    radial-gradient(ellipse 70% 60% at 35% 35%, rgba(200,190,170,0.70) 0%, rgba(160,145,120,0.75) 40%, rgba(100,85,65,0.90) 100%);
+  border: 0.5px solid rgba(180,170,150,0.50);
   box-shadow:
-    inset -6px -8px 18px rgba(0,0,0,0.40),
-    inset 4px 4px 10px rgba(140,180,240,0.15),
-    0 2px 8px rgba(0,0,0,0.25);
+    inset -6px -8px 18px rgba(0,0,0,0.20),
+    inset 4px 4px 10px rgba(255,250,240,0.30),
+    0 2px 8px rgba(0,0,0,0.10);
 }
 
-/* Teal overlay — sits on shell, crossfaded via opacity for smooth color blend */
+/* Warm overlay — crossfaded via opacity */
 .agent-orb .orb-teal {
   position: absolute; inset: 0;
   border-radius: 50%;
   background:
-    radial-gradient(ellipse 70% 60% at 35% 35%, rgba(60,190,200,0.6) 0%, rgba(30,120,140,0.65) 40%, rgba(10,50,60,0.88) 100%);
+    radial-gradient(ellipse 70% 60% at 35% 35%, rgba(227,83,54,0.65) 0%, rgba(180,65,40,0.70) 40%, rgba(120,40,25,0.88) 100%);
   opacity: 0;
   pointer-events: none;
 }
 
-/* Inner depth — volume inside the glass */
+/* Inner depth */
 .agent-orb .orb-core {
   position: absolute;
   top: 8px; left: 8px; right: 8px; bottom: 8px;
   border-radius: 50%;
   background:
-    radial-gradient(ellipse 90% 80% at 45% 40%, rgba(120,160,220,0.40) 0%, transparent 70%);
+    radial-gradient(ellipse 90% 80% at 45% 40%, rgba(180,170,150,0.50) 0%, transparent 70%);
 }
 
-/* Caustic — refracted light on the lower portion */
+/* Caustic */
 .agent-orb .orb-caustic {
   position: absolute;
   bottom: 6px; left: 50%; transform: translateX(-50%);
   width: 30px; height: 14px;
   border-radius: 50%;
-  background: radial-gradient(ellipse, rgba(120,160,220,0.35) 0%, transparent 80%);
+  background: radial-gradient(ellipse, rgba(180,170,150,0.30) 0%, transparent 80%);
 }
 
-/* Primary specular — top-left, overhead light source at ~10 o'clock */
+/* Primary specular */
 .agent-orb .orb-specular {
   position: absolute;
   top: 6px; left: 12px; width: 20px; height: 10px;
   border-radius: 50%;
   background: radial-gradient(ellipse 100% 80% at 50% 60%,
-    rgba(255,255,255,0.65) 0%,
-    rgba(255,255,255,0.15) 60%,
+    rgba(255,255,255,0.75) 0%,
+    rgba(255,255,255,0.25) 60%,
     transparent 100%);
   filter: blur(1.5px);
   transform: rotate(-15deg);
 }
 
-/* Secondary rim catch — faint edge on upper right */
+/* Secondary rim catch */
 .agent-orb .orb-rim {
   position: absolute;
   top: 3px; right: 8px; width: 10px; height: 6px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.25);
   filter: blur(2px);
 }
 
-/* Active — slow color fade + Y-axis rotation sold via specular/caustic sweep */
+/* Active — bright warm glow, unmistakable */
 .agent-orb.active .orb-shell {
-  border-color: rgba(100,200,220,0.55);
+  border-color: rgba(227,83,54,0.65);
   background:
-    radial-gradient(ellipse 70% 60% at 35% 35%, rgba(60,140,180,0.60) 0%, rgba(35,80,120,0.65) 40%, rgba(15,30,50,0.88) 100%);
+    radial-gradient(ellipse 70% 60% at 35% 35%, rgba(240,120,80,0.80) 0%, rgba(200,80,50,0.75) 40%, rgba(140,50,30,0.90) 100%);
   box-shadow:
-    inset -6px -8px 18px rgba(0,0,0,0.35),
-    inset 4px 4px 10px rgba(180,190,205,0.15),
-    0 0 25px rgba(60,180,220,0.30),
-    0 2px 8px rgba(0,0,0,0.25);
+    inset -6px -8px 18px rgba(0,0,0,0.20),
+    inset 4px 4px 10px rgba(255,200,160,0.35),
+    0 0 40px rgba(227,83,54,0.40),
+    0 0 80px rgba(227,83,54,0.15),
+    0 2px 8px rgba(0,0,0,0.15);
 }
 .agent-orb.active .orb-teal {
   animation: orb-teal-fade 4s ease-in-out infinite;
@@ -1088,7 +1139,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
   animation: orb-rim-sweep 6s linear infinite;
 }
 .agent-orb.active .orb-glow {
-  background: radial-gradient(circle, rgba(60,200,220,0.40) 0%, transparent 60%);
+  background: radial-gradient(circle, rgba(227,83,54,0.50) 0%, rgba(200,70,45,0.20) 50%, transparent 70%);
   animation: orb-glow-pulse 4s ease-in-out infinite;
 }
 .agent-orb.active .orb-caustic {
@@ -1097,14 +1148,14 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
 
 /* Idle — faded, dormant */
 .agent-orb.idle .orb-shell {
-  opacity: 0.6;
-  border-color: rgba(100,140,180,0.20);
+  opacity: 0.5;
+  border-color: rgba(0,0,0,0.10);
 }
 .agent-orb.idle .orb-core { opacity: 0.35; }
 .agent-orb.idle .orb-caustic { opacity: 0.2; }
 .agent-orb.idle .orb-specular { opacity: 0.45; }
 .agent-orb.idle .orb-rim { opacity: 0.25; }
-.agent-orb.idle .orb-glow { opacity: 0.35; }
+.agent-orb.idle .orb-glow { opacity: 0.25; }
 .agent-orb.idle .orb-teal { opacity: 0; }
 
 .agent-viz-label { text-align: center; font-size: 10px; color: var(--text-3); letter-spacing: 0.02em; margin-top: 6px; font-weight: 600; }
@@ -1187,7 +1238,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
     <span class="status-live" id="sse-status">LIVE</span>
     <span id="worker-status" class="text-muted">WORKER: OFF</span>
     <button class="btn btn-approve" id="worker-btn" onclick="toggleWorker()">START FLEET</button>
-    <span id="held-indicator" class="text-amber" style="display:none"></span>
+    <span id="held-indicator" style="display:none;color:var(--c-success)"></span>
     <span id="paused-indicator" class="status-paused" style="display:none">PAUSED</span>
     <button class="btn btn-pause" id="pause-btn">PAUSE</button>
     <button class="btn btn-ghost" id="new-task-btn" onclick="openNewTaskModal()">+ TASK</button>
@@ -1210,14 +1261,14 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
         <svg width="0" height="0" style="position:absolute">
           <defs>
             <linearGradient id="ring-grad-success" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="rgba(230,160,50,0.95)" />
-              <stop offset="40%" stop-color="rgba(180,110,25,0.9)" />
-              <stop offset="100%" stop-color="rgba(120,65,10,0.8)" />
+              <stop offset="0%" stop-color="rgba(240,96,64,0.95)" />
+              <stop offset="40%" stop-color="rgba(227,83,54,0.9)" />
+              <stop offset="100%" stop-color="rgba(196,72,48,0.8)" />
             </linearGradient>
             <linearGradient id="ring-grad-danger" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="rgba(200,70,70,0.95)" />
-              <stop offset="40%" stop-color="rgba(140,40,40,0.85)" />
-              <stop offset="100%" stop-color="rgba(75,20,20,0.75)" />
+              <stop offset="0%" stop-color="rgba(184,98,58,0.95)" />
+              <stop offset="40%" stop-color="rgba(160,82,45,0.9)" />
+              <stop offset="100%" stop-color="rgba(120,60,30,0.8)" />
             </linearGradient>
             <!-- Bevel filter for liquid glass ring effect -->
             <filter id="ring-bevel" x="-10%" y="-10%" width="120%" height="120%">
@@ -1240,7 +1291,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
             <div class="ring-label-inner">
               <div class="metric-value" id="m-rate">-</div>
             </div>
-            <div class="metric-label">Success</div>
+            <div class="metric-label" style="color:var(--c-success)">Success</div>
           </div>
           <div class="ring-gauge">
             <svg viewBox="0 0 120 120" class="ring-svg">
@@ -1269,7 +1320,7 @@ a:hover { text-decoration: underline; color: var(--c-accent-bright); }
     </div>
     <div class="panel">
       <div class="panel-header">Repos</div>
-      <div id="repo-chart" class="bar-chart"></div>
+      <div class="repo-rings-wrap"><div id="repo-chart" class="repo-rings"></div></div>
       <div class="panel-corners"></div>
     </div>
   </div>
@@ -1324,6 +1375,8 @@ const HOLD_MAP = {
 let _paused = false, _owner = '', _tasks = [], _selectedId = null, _prevIds = new Set();
 let _filter = 'all'; // 'all', 'running', 'failed', 'waiting', or a repo name
 let _repoFilter = null; // null or repo name string
+let _sortCol = 'id'; // column key to sort by
+let _sortAsc = false; // false = descending (newest first)
 
 /* ═══ Helpers ═══ */
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -1426,30 +1479,39 @@ function renderStageFlow(counts) {
   el.innerHTML = html;
 }
 
-/* ═══ Repo Bar Chart ═══ */
-function renderRepoChart(tasks) {
+/* ═══ Repo Ring Gauges ═══ */
+function renderRepoChart(tasks, repoNames) {
   const el = document.getElementById('repo-chart');
   const repos = {};
+  // Seed all registered repos so they always appear
+  if (repoNames) for (const n of repoNames) repos[n] = {total: 0, completed: 0, failed: 0};
   for (const t of tasks) {
     if (t.status === 'cancelled') continue;
     const r = t.repo_name || '?';
-    if (!repos[r]) repos[r] = {total: 0, failed: 0};
+    if (!repos[r]) repos[r] = {total: 0, completed: 0, failed: 0};
     repos[r].total++;
+    if (t.status === 'completed') repos[r].completed++;
     if (t.status === 'failed') repos[r].failed++;
   }
   const entries = Object.entries(repos).sort((a,b) => b[1].total - a[1].total);
   if (!entries.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
-  const maxVal = Math.max(...entries.map(([,v]) => v.total), 1);
+  const circumference = 2 * Math.PI * 48;
   el.innerHTML = entries.map(([name, v]) => {
-    const h = Math.max(4, Math.round(v.total / maxVal * 36));
-    const fh = v.failed > 0 ? Math.max(2, Math.round(v.failed / maxVal * 36)) : 0;
-    const okH = h - fh;
-    return `<div class="bar-col">
-      <div style="display:flex;flex-direction:column;align-items:center;gap:0">
-        ${fh > 0 ? `<div class="bar-fill fail-portion" style="height:${fh}px"></div>` : ''}
-        <div class="bar-fill" style="height:${okH}px"></div>
+    const done = v.completed + v.failed;
+    const successRate = done > 0 ? Math.round(v.completed / done * 100) : 0;
+    const filled = circumference * successRate / 100;
+    return `<div class="repo-ring ring-gauge">
+      <svg viewBox="0 0 120 120" class="ring-svg">
+        <circle class="ring-center" cx="60" cy="60" r="39" />
+        <circle class="ring-track" cx="60" cy="60" r="48" />
+        <circle class="ring-fill ring-fill-success" cx="60" cy="60" r="48"
+          stroke-dasharray="${filled} ${circumference - filled}"
+          filter="url(#ring-bevel)" />
+      </svg>
+      <div class="ring-label-inner">
+        <div class="metric-value">${v.total}</div>
       </div>
-      <div class="bar-label">${esc(name)}</div>
+      <div class="metric-label">${esc(name)}</div>
     </div>`;
   }).join('');
 }
@@ -1522,6 +1584,37 @@ function applyFilters(tasks) {
 }
 
 /* ═══ Fleet Table ═══ */
+function toggleSort(col) {
+  if (_sortCol === col) { _sortAsc = !_sortAsc; }
+  else { _sortCol = col; _sortAsc = col === 'id' ? false : true; }
+  renderFleet(_tasks);
+}
+
+const _statusOrder = {working:0, queued:1, pr_created:2, reviewing:3, reviewed:4, retrying:5, ci_passed:6, completed:7, failed:8, cancelled:9};
+
+function sortTasks(tasks) {
+  const dir = _sortAsc ? 1 : -1;
+  return [...tasks].sort((a, b) => {
+    let av, bv;
+    switch (_sortCol) {
+      case 'id': av = a.id; bv = b.id; break;
+      case 'status': av = _statusOrder[a.status]??99; bv = _statusOrder[b.status]??99; break;
+      case 'repo': av = (a.repo_name||'').toLowerCase(); bv = (b.repo_name||'').toLowerCase(); return av < bv ? -dir : av > bv ? dir : 0;
+      case 'issue': av = a.github_issue_number||0; bv = b.github_issue_number||0; break;
+      case 'model': av = (a.model||'').toLowerCase(); bv = (b.model||'').toLowerCase(); return av < bv ? -dir : av > bv ? dir : 0;
+      case 'time': av = a.elapsed_seconds||0; bv = b.elapsed_seconds||0; break;
+      default: av = a.id; bv = b.id;
+    }
+    return (av - bv) * dir;
+  });
+}
+
+function sortHeader(col, label) {
+  const active = _sortCol === col ? ' sort-active' : '';
+  const arrow = _sortCol === col ? (_sortAsc ? '<span class="sort-arrow">&#9650;</span>' : '<span class="sort-arrow">&#9660;</span>') : '';
+  return `<th class="sortable${active}" onclick="toggleSort('${col}')">${label}${arrow}</th>`;
+}
+
 function renderFleet(tasks) {
   const el = document.getElementById('fleet-content');
   const filtered = applyFilters(tasks);
@@ -1532,12 +1625,15 @@ function renderFleet(tasks) {
     return;
   }
 
-  const newIds = new Set(filtered.map(t => t.id));
+  const sorted = sortTasks(filtered);
+  const newIds = new Set(sorted.map(t => t.id));
 
   let html = '<table class="fleet-table"><thead><tr>';
-  html += '<th>ID</th><th>Status</th><th>Repo</th><th>Issue</th><th>PR</th><th>Model</th><th>Time</th><th>Actions</th>';
+  html += sortHeader('id','ID') + sortHeader('status','Status') + sortHeader('repo','Repo');
+  html += sortHeader('issue','Issue') + '<th>PR</th>' + sortHeader('model','Model');
+  html += sortHeader('time','Time') + '<th>Actions</th>';
   html += '</tr></thead><tbody>';
-  for (const t of filtered) {
+  for (const t of sorted) {
     const sel = t.id === _selectedId ? ' selected' : '';
     const isNew = !_prevIds.has(t.id) && _prevIds.size > 0 ? ' new-row' : '';
     const time = t.elapsed ? `<span class="text-cyan">${t.elapsed}</span>` : '—';
@@ -1881,7 +1977,7 @@ function update(data) {
   renderFilterBar();
   renderFleet(_tasks);
   updateMetrics(_tasks);
-  renderRepoChart(_tasks);
+  renderRepoChart(_tasks, data.repo_names);
 
   // Refresh detail if visible
   if (_selectedId) {
