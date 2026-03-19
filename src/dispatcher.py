@@ -12,6 +12,44 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import Config
+from .constants import (
+    CREDENTIAL_FILE_MODE,
+    MAX_OUTPUT_BYTES,
+    MAX_PR_DIFF_CHARS,
+    NAV_MAX_EDGES,
+    NAV_MAX_FILES,
+    NAV_MAX_SYMBOLS_PER_FILE,
+    PRLIMIT_MAX_FILE_SIZE,
+    PRLIMIT_MAX_PROCESSES,
+    READLINE_LIMIT,
+    SENSITIVE_ENV_VARS,
+    TIMEOUT_BATCH_ORCHESTRATION,
+    TIMEOUT_COMMIT_PUSH,
+    TIMEOUT_CONFLICT_CHECK,
+    TIMEOUT_GIT_CLONE,
+    TIMEOUT_GIT_FETCH,
+    TIMEOUT_GIT_PUSH,
+    TIMEOUT_NAVIGATION_MODEL,
+    TIMEOUT_PR_CREATE,
+    TIMEOUT_REVIEW_AGENT,
+    TIMEOUT_TRIAGE_MODEL,
+    TIMEOUT_VERIFY_AGENT,
+    TRUNCATE_BATCH_ISSUE_BODY,
+    TRUNCATE_BRANCH_SLUG,
+    TRUNCATE_COMMIT_MSG,
+    TRUNCATE_ERROR_MESSAGE,
+    TRUNCATE_LOG_LINE,
+    TRUNCATE_NAV_CONTEXT,
+    TRUNCATE_OUTPUT_TAIL,
+    TRUNCATE_PR_TITLE,
+    TRUNCATE_PROMPT_FOR_REVIEW,
+    TRUNCATE_REASON,
+    TRUNCATE_REVIEW_OUTPUT,
+    TRUNCATE_SUMMARY,
+    TRUNCATE_TRIAGE_BODY,
+    TRUNCATE_VERIFY_OUTPUT,
+    prlimit_args,
+)
 from .db import Database
 from .github import (
     comment_on_issue,
@@ -112,7 +150,7 @@ def detect_stack(repo_path: Path) -> str:
                 parts.append("Alembic")
             if "pytest" in content.lower():
                 parts.append("pytest")
-        except Exception:
+        except OSError:
             pass
     elif (repo_path / "requirements.txt").exists() or (repo_path / "setup.py").exists():
         parts.append("Python")
@@ -141,7 +179,7 @@ def detect_stack(repo_path: Path) -> str:
                 parts.append("Jest")
             elif "vitest" in deps:
                 parts.append("Vitest")
-        except Exception:
+        except (json.JSONDecodeError, KeyError, TypeError, IndexError, OSError):
             parts.append("Node.js")
 
     if cargo_toml.exists():
@@ -150,7 +188,7 @@ def detect_stack(repo_path: Path) -> str:
             content = cargo_toml.read_text(errors="replace")
             if "tauri" in content.lower():
                 parts.append("Tauri")
-        except Exception:
+        except OSError:
             pass
 
     if go_mod.exists():
@@ -162,7 +200,7 @@ def detect_stack(repo_path: Path) -> str:
             content = gemfile.read_text(errors="replace")
             if "rails" in content.lower():
                 parts.append("Rails")
-        except Exception:
+        except OSError:
             pass
 
     # Infra
@@ -200,10 +238,10 @@ async def record_learning(
     for line in context.strip().splitlines():
         line = line.strip()
         if line:
-            content = line[:500]
+            content = line[:TRUNCATE_SUMMARY]
             break
     if not content:
-        content = context.strip()[:500]
+        content = context.strip()[:TRUNCATE_SUMMARY]
     if not content:
         return
     try:
@@ -257,17 +295,17 @@ async def generate_navigation_context(
 
         # Format graph data for the navigation model
         matched_text = "\n".join(
-            f"- {f['path']}: {', '.join(f['symbols'][:5])} ({f['match_reason']})" for f in nav_data["matched_files"]
+            f"- {f['path']}: {', '.join(f['symbols'][:NAV_MAX_SYMBOLS_PER_FILE])} ({f['match_reason']})" for f in nav_data["matched_files"]
         )
         related_text = (
             "\n".join(
-                f"- {f['path']}: {', '.join(f['symbols'][:5])} (via {f['relationship']})"
+                f"- {f['path']}: {', '.join(f['symbols'][:NAV_MAX_SYMBOLS_PER_FILE])} (via {f['relationship']})"
                 for f in nav_data["related_files"]
             )
             or "(none)"
         )
         edges_text = (
-            "\n".join(f"- {e['from']} --[{e['kind']}]--> {e['to']}" for e in nav_data["edges"][:20]) or "(none)"
+            "\n".join(f"- {e['from']} --[{e['kind']}]--> {e['to']}" for e in nav_data["edges"][:NAV_MAX_EDGES]) or "(none)"
         )
 
         nav_prompt = NAVIGATION_PROMPT.format(
@@ -299,7 +337,7 @@ async def generate_navigation_context(
             env=nav_env,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_NAVIGATION_MODEL)
         except asyncio.TimeoutError:
             try:
                 proc.kill()
@@ -347,19 +385,19 @@ async def generate_navigation_context(
             "These files are most relevant to your task (from dependency analysis):",
         ]
         total_len = sum(len(line) for line in section_lines)
-        for entry in files[:15]:
+        for entry in files[:NAV_MAX_FILES]:
             if not isinstance(entry, dict):
                 continue
             fpath = entry.get("file", "")
             symbols = entry.get("symbols", [])
             why = entry.get("why", "")
-            sym_str = ", ".join(str(s) for s in symbols[:5]) if symbols else ""
+            sym_str = ", ".join(str(s) for s in symbols[:NAV_MAX_SYMBOLS_PER_FILE]) if symbols else ""
             line = f"  - {fpath}"
             if sym_str:
                 line += f" — {sym_str}"
             if why:
                 line += f"\n    Why: {why}"
-            if total_len + len(line) > 4000:
+            if total_len + len(line) > TRUNCATE_NAV_CONTEXT:
                 break
             section_lines.append(line)
             total_len += len(line)
@@ -413,7 +451,7 @@ def repo_name_from_url(url: str) -> str:
 
 def make_branch_name(task_id: int, prompt: str) -> str:
     """Generate a safe branch name from task ID and prompt."""
-    slug = re.sub(r"[^a-z0-9]+", "-", prompt.lower().strip())[:40].strip("-")
+    slug = re.sub(r"[^a-z0-9]+", "-", prompt.lower().strip())[:TRUNCATE_BRANCH_SLUG].strip("-")
     if slug:
         branch = f"backporcher/{task_id}-{slug}"
     else:
@@ -461,7 +499,7 @@ async def clone_or_fetch(repo: dict, config: Config) -> Path:
     else:
         log.info("Cloning %s -> %s", repo["github_url"], local_path)
         local_path.mkdir(parents=True, exist_ok=True)
-        rc, _, err = await run_cmd("git", "clone", repo["github_url"], str(local_path), timeout=300)
+        rc, _, err = await run_cmd("git", "clone", repo["github_url"], str(local_path), timeout=TIMEOUT_GIT_CLONE)
         if rc != 0:
             raise RuntimeError(f"git clone failed: {err}")
 
@@ -511,7 +549,7 @@ async def setup_worktree(
         "--delete",
         branch_name,
         cwd=repo_path,
-        timeout=30,
+        timeout=TIMEOUT_GIT_FETCH,
     )
     if rc == 0:
         log.info("Deleted stale remote branch %s", branch_name)
@@ -602,26 +640,18 @@ async def run_agent(
             "-u",
             config.agent_user,
             "--",
-            "prlimit",
-            "--nproc=500",  # max 500 processes
-            "--fsize=2147483648",  # 2 GB max file size
-            "--",
+            *prlimit_args(),
             *cmd,
         ]
         agent_env = None  # Let sudo reset env to target user's defaults
     else:
         # Clean env: strip sensitive vars and CLAUDECODE (nested-session detection)
-        _sensitive_vars = {
+        _sensitive_vars = SENSITIVE_ENV_VARS | {
             "CLAUDECODE",
             "SSH_AUTH_SOCK",
             "SSH_AGENT_PID",
             "GIT_ASKPASS",
             "GIT_CREDENTIALS",
-            "GITHUB_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
         }
         agent_env = {k: v for k, v in os.environ.items() if k not in _sensitive_vars}
 
@@ -634,7 +664,7 @@ async def run_agent(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
-        limit=1024 * 1024,  # 1 MB readline limit (Claude streams large JSON events)
+        limit=READLINE_LIMIT,
         **({"env": agent_env} if agent_env is not None else {}),
     )
 
@@ -643,7 +673,6 @@ async def run_agent(
     output_summary = None
     last_content: list[str] = []
     content_size = 0
-    MAX_CONTENT_BYTES = 10 * 1024 * 1024  # 10 MB cap on in-memory output
 
     async def read_stream():
         nonlocal output_summary, content_size
@@ -670,7 +699,7 @@ async def run_agent(
                     for block in msg.get("content") or []:
                         if block.get("type") == "text":
                             text = block["text"]
-                            if content_size < MAX_CONTENT_BYTES:
+                            if content_size < MAX_OUTPUT_BYTES:
                                 last_content.append(text)
                                 content_size += len(text)
 
@@ -679,7 +708,7 @@ async def run_agent(
                     if event.get("is_error"):
                         await db.add_log(
                             task["id"],
-                            f"Agent error: {output_summary[:500]}",
+                            f"Agent error: {output_summary[:TRUNCATE_SUMMARY]}",
                             level="error",
                         )
 
@@ -687,7 +716,7 @@ async def run_agent(
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
                         text = delta.get("text", "")
-                        if content_size < MAX_CONTENT_BYTES:
+                        if content_size < MAX_OUTPUT_BYTES:
                             last_content.append(text)
                             content_size += len(text)
 
@@ -695,7 +724,7 @@ async def run_agent(
         async for raw_line in proc.stderr:
             line = raw_line.decode(errors="replace").strip()
             if line:
-                await db.add_log(task["id"], f"stderr: {line[:500]}", level="warn")
+                await db.add_log(task["id"], f"stderr: {line[:TRUNCATE_LOG_LINE]}", level="warn")
 
     try:
         await asyncio.wait_for(
@@ -723,7 +752,7 @@ async def run_agent(
         await proc.wait()
 
     if not output_summary and last_content:
-        output_summary = "".join(last_content)[-2000:]
+        output_summary = "".join(last_content)[-TRUNCATE_OUTPUT_TAIL:]
 
     await db.add_log(
         task["id"],
@@ -753,10 +782,7 @@ async def run_verify(
             "-u",
             config.agent_user,
             "--",
-            "prlimit",
-            "--nproc=500",
-            "--fsize=2147483648",
-            "--",
+            *prlimit_args(),
             *cmd,
         ]
 
@@ -767,11 +793,11 @@ async def run_verify(
         stderr=asyncio.subprocess.STDOUT,
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_VERIFY_AGENT)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        return False, "Verify command timed out after 300s"
+        return False, f"Verify command timed out after {TIMEOUT_VERIFY_AGENT}s"
 
     output = stdout.decode(errors="replace")
     if proc.returncode == 0:
@@ -779,8 +805,8 @@ async def run_verify(
         return True, output
 
     # Truncate to last 3000 chars (most relevant part)
-    if len(output) > 3000:
-        output = "...(truncated)...\n" + output[-3000:]
+    if len(output) > TRUNCATE_VERIFY_OUTPUT:
+        output = "...(truncated)...\n" + output[-TRUNCATE_VERIFY_OUTPUT:]
     await db.add_log(task_id, f"Verify failed (exit {proc.returncode})", level="warn")
     return False, output
 
@@ -808,7 +834,7 @@ async def create_pr(
             return None
         # Stage + commit uncommitted changes
         await run_cmd("git", "add", "-A", cwd=worktree_path)
-        commit_msg = f"backporcher: {task['prompt'][:72]}\n\nTask #{task['id']}"
+        commit_msg = f"backporcher: {task['prompt'][:TRUNCATE_COMMIT_MSG]}\n\nTask #{task['id']}"
         rc3, _, err = await run_cmd("git", "commit", "-m", commit_msg, cwd=worktree_path)
         if rc3 != 0:
             await db.add_log(task["id"], f"git commit failed: {err}", level="error")
@@ -824,18 +850,18 @@ async def create_pr(
         "origin",
         branch,
         cwd=worktree_path,
-        timeout=120,
+        timeout=TIMEOUT_COMMIT_PUSH,
     )
     if rc != 0:
         await db.add_log(task["id"], f"git push failed: {err}", level="error")
         raise RuntimeError(f"git push failed: {err}")
 
-    pr_title = f"[backporcher] {task['prompt'][:60]}"
+    pr_title = f"[backporcher] {task['prompt'][:TRUNCATE_PR_TITLE]}"
     issue_num = task.get("github_issue_number")
     closes_line = f"\n\nCloses #{issue_num}" if issue_num else ""
     pr_body = (
         f"## Backporcher Task #{task['id']}\n\n"
-        f"**Prompt:** {task['prompt'][:500]}\n\n"
+        f"**Prompt:** {task['prompt'][:TRUNCATE_SUMMARY]}\n\n"
         f"**Model:** {task['model']}\n\n"
         f"---\n_Created by Backporcher dispatcher_{closes_line}"
     )
@@ -852,7 +878,7 @@ async def create_pr(
         "--base",
         repo["default_branch"],
         cwd=worktree_path,
-        timeout=60,
+        timeout=TIMEOUT_PR_CREATE,
     )
     if rc != 0:
         await db.add_log(task["id"], f"PR creation failed: {err}", level="error")
@@ -945,8 +971,8 @@ async def run_review(
         except Exception:
             log.exception("Graph context failed for task %d, falling back to raw diff", task["id"])
             # Fallback: truncate diff the old way
-            if len(pr_diff) > 15000:
-                pr_diff = pr_diff[:15000] + "\n...(diff truncated at 15000 chars)..."
+            if len(pr_diff) > MAX_PR_DIFF_CHARS:
+                pr_diff = pr_diff[:MAX_PR_DIFF_CHARS] + f"\n...(diff truncated at {MAX_PR_DIFF_CHARS} chars)..."
 
     # Format other open PRs (exclude this one)
     other_prs_lines = []
@@ -959,7 +985,7 @@ async def run_review(
 
     # Build the review prompt
     review_prompt = REVIEW_PROMPT_TEMPLATE.format(
-        task_prompt=task["prompt"][:2000],
+        task_prompt=task["prompt"][:TRUNCATE_PROMPT_FOR_REVIEW],
         pr_diff=pr_diff,
         blast_radius=blast_radius_text,
         other_prs=other_prs_text,
@@ -985,25 +1011,17 @@ async def run_review(
             "-u",
             config.agent_user,
             "--",
-            "prlimit",
-            "--nproc=500",
-            "--fsize=2147483648",
-            "--",
+            *prlimit_args(),
             *cmd,
         ]
         agent_env = None
     else:
-        _sensitive_vars = {
+        _sensitive_vars = SENSITIVE_ENV_VARS | {
             "CLAUDECODE",
             "SSH_AUTH_SOCK",
             "SSH_AGENT_PID",
             "GIT_ASKPASS",
             "GIT_CREDENTIALS",
-            "GITHUB_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
         }
         agent_env = {k: v for k, v in os.environ.items() if k not in _sensitive_vars}
 
@@ -1021,18 +1039,18 @@ async def run_review(
     try:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(),
-            timeout=300,
+            timeout=TIMEOUT_REVIEW_AGENT,
         )
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        return "reject", "Review timed out after 300s"
+        return "reject", f"Review timed out after {TIMEOUT_REVIEW_AGENT}s"
 
     output = stdout.decode(errors="replace")
     if proc.returncode != 0:
         err_text = stderr.decode(errors="replace")
-        log.error("Review agent failed for task %d: %s", task["id"], err_text[:500])
-        return "reject", f"Review agent exited with code {proc.returncode}: {err_text[:500]}"
+        log.error("Review agent failed for task %d: %s", task["id"], err_text[:TRUNCATE_LOG_LINE])
+        return "reject", f"Review agent exited with code {proc.returncode}: {err_text[:TRUNCATE_LOG_LINE]}"
 
     # Parse verdict — strip markdown bold/italic markers before matching
     verdict = "reject"
@@ -1045,7 +1063,7 @@ async def run_review(
             verdict = "reject"
             break
 
-    summary = output[-4000:] if len(output) > 4000 else output
+    summary = output[-TRUNCATE_REVIEW_OUTPUT:] if len(output) > TRUNCATE_REVIEW_OUTPUT else output
     return verdict, summary
 
 
@@ -1114,7 +1132,7 @@ async def cleanup_task_artifacts(task: dict, db: Database):
             "--delete",
             branch,
             cwd=repo_path,
-            timeout=30,
+            timeout=TIMEOUT_GIT_FETCH,
         )
         if rc == 0:
             log.info("Task #%d: deleted remote branch %s", task_id, branch)
@@ -1201,7 +1219,7 @@ async def retry_with_ci_context(
         "origin",
         branch,
         cwd=worktree_path,
-        timeout=120,
+        timeout=TIMEOUT_COMMIT_PUSH,
     )
     if rc != 0:
         await db.add_log(task_id, f"Force push failed on retry: {err}", level="error")
@@ -1242,7 +1260,7 @@ async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]
     """Run haiku to classify issue complexity. Returns (model, reason)."""
     prompt = TRIAGE_PROMPT_TEMPLATE.format(
         title=title,
-        body=(body or "(no body)")[:3000],
+        body=(body or "(no body)")[:TRUNCATE_TRIAGE_BODY],
     )
 
     cmd = ["claude", "-p", "--output-format", "text", "--model", "haiku", prompt]
@@ -1253,25 +1271,17 @@ async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]
             "-u",
             config.agent_user,
             "--",
-            "prlimit",
-            "--nproc=500",
-            "--fsize=2147483648",
-            "--",
+            *prlimit_args(),
             *cmd,
         ]
         agent_env = None
     else:
-        _sensitive_vars = {
+        _sensitive_vars = SENSITIVE_ENV_VARS | {
             "CLAUDECODE",
             "SSH_AUTH_SOCK",
             "SSH_AGENT_PID",
             "GIT_ASKPASS",
             "GIT_CREDENTIALS",
-            "GITHUB_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
         }
         agent_env = {k: v for k, v in os.environ.items() if k not in _sensitive_vars}
 
@@ -1284,7 +1294,7 @@ async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]
     )
 
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_TRIAGE_MODEL)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
@@ -1319,7 +1329,7 @@ async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]
             )
             return "sonnet", reason
 
-    log.warning("Could not parse triage output, defaulting to %s: %s", config.default_model, output[:200])
+    log.warning("Could not parse triage output, defaulting to %s: %s", config.default_model, output[:TRUNCATE_REASON])
     return config.default_model, "unparseable triage output"
 
 
@@ -1364,7 +1374,7 @@ async def orchestrate_batch(
     issue_number, model, priority, depends_on, reason. Returns None on failure."""
     issues_lines = []
     for iss in issues:
-        body = (iss.get("body") or "(no body)")[:1000]
+        body = (iss.get("body") or "(no body)")[:TRUNCATE_BATCH_ISSUE_BODY]
         issues_lines.append(f"### Issue #{iss['number']}: {iss['title']}\n{body}\n")
 
     prompt = BATCH_ORCHESTRATE_PROMPT_TEMPLATE.format(
@@ -1381,25 +1391,17 @@ async def orchestrate_batch(
             "-u",
             config.agent_user,
             "--",
-            "prlimit",
-            "--nproc=500",
-            "--fsize=2147483648",
-            "--",
+            *prlimit_args(),
             *cmd,
         ]
         agent_env = None
     else:
-        _sensitive_vars = {
+        _sensitive_vars = SENSITIVE_ENV_VARS | {
             "CLAUDECODE",
             "SSH_AUTH_SOCK",
             "SSH_AGENT_PID",
             "GIT_ASKPASS",
             "GIT_CREDENTIALS",
-            "GITHUB_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
         }
         agent_env = {k: v for k, v in os.environ.items() if k not in _sensitive_vars}
 
@@ -1412,7 +1414,7 @@ async def orchestrate_batch(
     )
 
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_BATCH_ORCHESTRATION)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
@@ -1421,7 +1423,7 @@ async def orchestrate_batch(
 
     output = stdout.decode(errors="replace").strip()
     if proc.returncode != 0:
-        log.warning("Batch orchestration failed (exit %d): %s", proc.returncode, stderr.decode(errors="replace")[:200])
+        log.warning("Batch orchestration failed (exit %d): %s", proc.returncode, stderr.decode(errors="replace")[:TRUNCATE_REASON])
         return None
 
     # Strip markdown fences if present
@@ -1438,7 +1440,7 @@ async def orchestrate_batch(
     try:
         result = json.loads(cleaned)
     except json.JSONDecodeError:
-        log.warning("Batch orchestration returned invalid JSON: %s", cleaned[:300])
+        log.warning("Batch orchestration returned invalid JSON: %s", cleaned[:TRUNCATE_REASON])
         return None
 
     if not isinstance(result, list):
@@ -1470,7 +1472,7 @@ async def orchestrate_batch(
                 "model": model,
                 "priority": priority,
                 "depends_on": depends_on,
-                "reason": str(reason)[:200],
+                "reason": str(reason)[:TRUNCATE_REASON],
             }
         )
 
@@ -1496,7 +1498,7 @@ async def sync_agent_credentials(config: Config):
     if not config.agent_user:
         return
     admin_cred = Path.home() / ".claude" / ".credentials.json"
-    agent_cred = Path(f"/home/{config.agent_user}/.claude/.credentials.json")
+    agent_cred = Path(f"/home/{config.agent_user}") / ".claude" / ".credentials.json"
     if not admin_cred.exists():
         return
     # Use sudo stat to check agent cred mtime (file is 600 owned by agent user)
@@ -1515,7 +1517,7 @@ async def sync_agent_credentials(config: Config):
             "sudo",
             "install",
             "-m",
-            "600",
+            f"{CREDENTIAL_FILE_MODE:o}",
             "-o",
             config.agent_user,
             "-g",
@@ -1569,11 +1571,11 @@ async def check_task_conflict(
 
     summaries = []
     for t in inflight_tasks:
-        summaries.append(f"- Task #{t['id']} ({t['status']}): {t['prompt'][:200]}")
+        summaries.append(f"- Task #{t['id']} ({t['status']}): {t['prompt'][:TRUNCATE_REASON]}")
     inflight_text = "\n".join(summaries)
 
     prompt = CONFLICT_CHECK_PROMPT_TEMPLATE.format(
-        new_task_prompt=task_prompt[:2000],
+        new_task_prompt=task_prompt[:TRUNCATE_PROMPT_FOR_REVIEW],
         inflight_summaries=inflight_text,
     )
 
@@ -1585,25 +1587,17 @@ async def check_task_conflict(
             "-u",
             config.agent_user,
             "--",
-            "prlimit",
-            "--nproc=500",
-            "--fsize=2147483648",
-            "--",
+            *prlimit_args(),
             *cmd,
         ]
         agent_env = None
     else:
-        _sensitive_vars = {
+        _sensitive_vars = SENSITIVE_ENV_VARS | {
             "CLAUDECODE",
             "SSH_AUTH_SOCK",
             "SSH_AGENT_PID",
             "GIT_ASKPASS",
             "GIT_CREDENTIALS",
-            "GITHUB_TOKEN",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
         }
         agent_env = {k: v for k, v in os.environ.items() if k not in _sensitive_vars}
 
@@ -1616,7 +1610,7 @@ async def check_task_conflict(
     )
 
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT_CONFLICT_CHECK)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
@@ -1641,7 +1635,7 @@ async def check_task_conflict(
     try:
         result = json.loads(cleaned)
     except json.JSONDecodeError:
-        log.warning("Conflict check returned invalid JSON: %s", cleaned[:200])
+        log.warning("Conflict check returned invalid JSON: %s", cleaned[:TRUNCATE_REASON])
         return None
 
     if not isinstance(result, dict):
@@ -1706,7 +1700,7 @@ async def dispatch_task(task: dict, config: Config, db: Database):
         await db.update_task(
             task_id,
             exit_code=exit_code,
-            output_summary=summary[:4000] if summary else None,
+            output_summary=summary[:TRUNCATE_REVIEW_OUTPUT] if summary else None,
             agent_finished_at=agent_finish_now,
             model_used=task["model"],
         )
@@ -1764,7 +1758,7 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                 task["repo_id"],
                 task_id,
                 "agent_failure",
-                f"Agent failed (exit {exit_code}) on: {task['prompt'][:200]}",
+                f"Agent failed (exit {exit_code}) on: {task['prompt'][:TRUNCATE_REASON]}",
             )
             await _mark_issue_failed(
                 task,
@@ -1809,7 +1803,7 @@ async def dispatch_task(task: dict, config: Config, db: Database):
                         task["repo_id"],
                         task_id,
                         "verify_failure",
-                        f"Build verification failed ({verify_command}) on: {task['prompt'][:200]}",
+                        f"Build verification failed ({verify_command}) on: {task['prompt'][:TRUNCATE_REASON]}",
                     )
                     await _mark_issue_failed(
                         task,
@@ -1878,7 +1872,7 @@ async def dispatch_task(task: dict, config: Config, db: Database):
 
     except Exception as e:
         log.exception("Task %d failed", task_id)
-        err_str = str(e)[:2000]
+        err_str = str(e)[:TRUNCATE_ERROR_MESSAGE]
         now = datetime.now(timezone.utc).isoformat()
 
         retry_count = task.get("retry_count", 0)
@@ -1897,7 +1891,7 @@ async def dispatch_task(task: dict, config: Config, db: Database):
             )
             await db.add_log(
                 task_id,
-                f"Error, retry {new_count}/{config.max_task_retries} (model={new_model}): {err_str[:200]}",
+                f"Error, retry {new_count}/{config.max_task_retries} (model={new_model}): {err_str[:TRUNCATE_REASON]}",
                 level="warn",
             )
             log.info(
@@ -1924,7 +1918,7 @@ async def dispatch_task(task: dict, config: Config, db: Database):
             await _mark_issue_failed(
                 task,
                 db,
-                f"Task failed with error: {err_str[:300]}",
+                f"Task failed with error: {err_str[:TRUNCATE_REASON]}",
             )
             await cleanup_task_artifacts(task, db)
             cascaded = await db.handle_dependency_failure(task_id)

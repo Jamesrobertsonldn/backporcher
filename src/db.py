@@ -122,7 +122,7 @@ def _get_schema_version(conn) -> int:
         cur = conn.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
         row = cur.fetchone()
         return row[0] if row else 1
-    except Exception:
+    except sqlite3.OperationalError:
         # No schema_version table — check if tasks table exists (v1)
         cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'")
         return 1 if cur.fetchone() else 0
@@ -268,7 +268,7 @@ CREATE INDEX IF NOT EXISTS idx_repo_learnings_repo ON repo_learnings(repo_id);
         # v4: add verify_command to repos
         try:
             conn.execute("ALTER TABLE repos ADD COLUMN verify_command TEXT")
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # Column already exists
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -278,11 +278,11 @@ CREATE INDEX IF NOT EXISTS idx_repo_learnings_repo ON repo_learnings(repo_id);
         # v5: add priority and depends_on_task_id to tasks
         try:
             conn.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 100")
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # Column already exists
         try:
             conn.execute("ALTER TABLE tasks ADD COLUMN depends_on_task_id INTEGER")
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # Column already exists
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority)")
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
@@ -293,7 +293,7 @@ CREATE INDEX IF NOT EXISTS idx_repo_learnings_repo ON repo_learnings(repo_id);
         # v6: add hold column to tasks + system_state table
         try:
             conn.execute("ALTER TABLE tasks ADD COLUMN hold TEXT")
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # Column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS system_state (
@@ -316,7 +316,7 @@ CREATE INDEX IF NOT EXISTS idx_repo_learnings_repo ON repo_learnings(repo_id);
         ]:
             try:
                 conn.execute(col)
-            except Exception:
+            except sqlite3.OperationalError:
                 pass  # Column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS metrics (
@@ -339,7 +339,7 @@ CREATE INDEX IF NOT EXISTS idx_repo_learnings_repo ON repo_learnings(repo_id);
         # v8: add stack_info to repos + repo_learnings table
         try:
             conn.execute("ALTER TABLE repos ADD COLUMN stack_info TEXT")
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # Column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS repo_learnings (
@@ -639,7 +639,7 @@ class Database:
                     (event, task_id, repo, model, value, now),
                 )
                 await self.db.commit()
-        except Exception:
+        except (sqlite3.OperationalError, sqlite3.IntegrityError):
             import logging
 
             logging.getLogger("backporcher.db").warning(
@@ -978,7 +978,7 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
                 (event, task_id, repo, model, value, now),
             )
             self.db.commit()
-        except Exception:
+        except (sqlite3.OperationalError, sqlite3.IntegrityError):
             import logging
 
             logging.getLogger("backporcher.db").warning(

@@ -39,6 +39,7 @@ from .github import (
     repo_full_name_from_url,
     update_issue_labels,
 )
+from . import notifications
 
 log = logging.getLogger("backporcher.worker")
 
@@ -421,7 +422,7 @@ class WorkerDaemon:
             s = datetime.fromisoformat(start.replace("Z", "+00:00"))
             e = datetime.fromisoformat(end.replace("Z", "+00:00"))
             return (e - s).total_seconds()
-        except Exception:
+        except (ValueError, AttributeError):
             return None
 
     # --- Loop 3: Coordinator Review ---
@@ -592,10 +593,8 @@ class WorkerDaemon:
                             await cleanup_task_artifacts(task, self.db)
 
                             # Webhook: failed
-                            from . import notifications as _notif
-
                             _title = task.get("prompt", "")[:80]
-                            await _notif.notify_failed(task_id, _title, "coordinator rejected PR (retries exhausted)")
+                            await notifications.notify_failed(task_id, _title, "coordinator rejected PR (retries exhausted)")
 
             except Exception:
                 log.exception("Error in coordinator review loop")
@@ -718,17 +717,13 @@ class WorkerDaemon:
             log.info("Task #%d: held for merge approval", task_id)
             # Post PR comment
             if pr_number:
-                from .github import comment_on_pr as _comment_on_pr
-
-                await _comment_on_pr(
+                await comment_on_pr(
                     repo_full,
                     pr_number,
                     f"CI passed. Awaiting merge approval.\n\n"
                     f"Run `backporcher approve {task_id}` or use the dashboard to merge.",
                 )
             # Webhook notification
-            from . import notifications
-
             title = task.get("prompt", "")[:80]
             await notifications.notify_hold(task_id, title, "merge_approval")
             return
@@ -780,8 +775,6 @@ class WorkerDaemon:
                 await cleanup_task_artifacts(task, self.db)
 
                 # Webhook: completed
-                from . import notifications
-
                 title = task.get("prompt", "")[:80]
                 dur = self._compute_duration(task.get("created_at"), now)
                 dur_str = f"{int(dur // 60)}m" if dur else "?"
@@ -892,8 +885,6 @@ class WorkerDaemon:
             await cleanup_task_artifacts(task, self.db)
 
             # Webhook: completed
-            from . import notifications
-
             title = task.get("prompt", "")[:80]
             dur = self._compute_duration(task.get("created_at"), now)
             dur_str = f"{int(dur // 60)}m" if dur else "?"
@@ -1018,8 +1009,6 @@ class WorkerDaemon:
             await cleanup_task_artifacts(task, self.db)
 
             # Webhook: failed
-            from . import notifications
-
             title = task.get("prompt", "")[:80]
             await notifications.notify_failed(task_id, title, f"CI failed after {self.config.max_ci_retries} retries")
 
@@ -1074,7 +1063,7 @@ class WorkerDaemon:
                         break
                     try:
                         await cleanup_task_artifacts(task, self.db)
-                    except Exception:
+                    except OSError:
                         log.exception(
                             "Cleanup failed for task #%d",
                             task["id"],
@@ -1190,8 +1179,6 @@ async def _run_worker():
         log.error("Preflight checks failed — starting anyway but tasks may fail")
 
     # Initialize webhook notifications
-    from . import notifications
-
     notifications.init(config)
     if config.webhook_url:
         log.info("Webhooks enabled: %s (events: %s)", config.webhook_url, ",".join(config.webhook_events))

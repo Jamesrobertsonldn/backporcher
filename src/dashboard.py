@@ -83,8 +83,8 @@ async def _read_worker_output():
                 _worker_log_lines.append(line)
                 if len(_worker_log_lines) > _WORKER_LOG_MAX:
                     _worker_log_lines.pop(0)
-    except Exception:
-        pass
+    except (OSError, UnicodeDecodeError) as exc:
+        log.debug("Worker output stream ended: %s", exc)
     # Process exited
     if _worker_proc:
         await _worker_proc.wait()
@@ -158,7 +158,7 @@ def _check_auth(request: web.Request, password: str) -> bool:
         decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
         _, _, pwd = decoded.partition(":")
         return secrets.compare_digest(pwd, password)
-    except Exception:
+    except (ValueError, UnicodeDecodeError):
         return False
 
 
@@ -216,7 +216,7 @@ async def _build_status(db: Database) -> dict:
                 row["elapsed_seconds"] = int(elapsed)
                 mins, secs = divmod(int(elapsed), 60)
                 row["elapsed"] = f"{mins}m{secs:02d}s"
-            except Exception:
+            except (ValueError, TypeError, OverflowError):
                 row["elapsed"] = "?"
                 row["elapsed_seconds"] = 0
         else:
@@ -1226,7 +1226,7 @@ async def stats_handler(request: web.Request) -> web.Response:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
-        except Exception:
+        except (ValueError, TypeError):
             return None
 
     completed = [t for t in tasks if t["status"] == "completed"]
@@ -1338,7 +1338,7 @@ async def edit_task_handler(request: web.Request) -> web.Response:
 
     try:
         body = await request.json()
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
 
     updates = {}
@@ -1414,7 +1414,7 @@ async def requeue_task_handler(request: web.Request) -> web.Response:
 
     try:
         body = await request.json()
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         body = {}
 
     updates = {
@@ -1467,7 +1467,7 @@ async def escalate_task_handler(request: web.Request) -> web.Response:
 
     try:
         body = await request.json()
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         body = {}
 
     target_model = body.get("model", "opus")
@@ -1655,7 +1655,7 @@ async def dispatch_single_handler(request: web.Request) -> web.Response:
                     )
                     await db.add_log(task_id, "Single dispatch failed", level="error")
                 except Exception:
-                    pass
+                    log.exception("Failed to record dispatch failure for task %d", task_id)
             finally:
                 _dispatching.discard(task_id)
 
@@ -1675,13 +1675,16 @@ async def create_task_handler(request: web.Request) -> web.Response:
     db = request.app["db"]
     try:
         body = await request.json()
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
 
     repo_name = body.get("repo")
     prompt = body.get("prompt", "").strip()
     model = body.get("model", "sonnet")
-    priority = int(body.get("priority", 100))
+    try:
+        priority = int(body.get("priority", 100))
+    except (ValueError, TypeError):
+        priority = 100
 
     if not repo_name:
         return web.json_response({"ok": False, "error": "repo is required"}, status=400)
@@ -1741,7 +1744,7 @@ async def pause_handler(request: web.Request) -> web.Response:
         queued = await db.count_queued()
         await notifications.notify_paused(active, queued)
     except Exception:
-        pass
+        log.warning("Failed to send pause notification", exc_info=True)
 
     return web.json_response({"ok": True, "queue_paused": True})
 

@@ -70,6 +70,7 @@ Controls how much human oversight the pipeline requires. Set via `BACKPORCHER_AP
 
 | File | Purpose |
 |------|---------|
+| `src/constants.py` | Centralized constants — timeouts, process limits (prlimit), truncation lengths, sandbox env vars, `prlimit_args()` helper |
 | `src/cli.py` | CLI entry point: `fleet`, `status`, `stats`, `cancel`, `cleanup`, `approve`, `hold`, `release`, `pause`, `resume`, `repo` (incl. `learnings`), `worker` |
 | `src/worker.py` | Background daemon — 6 async loops, graceful shutdown, startup recovery, preflight checks |
 | `src/dashboard.py` | aiohttp web dashboard: HTTP Basic Auth, SSE real-time updates, JSON API, warm light theme (cream/beige, CSS in backporcher-theme.css), task control (approve/hold/reject/edit/requeue/escalate) |
