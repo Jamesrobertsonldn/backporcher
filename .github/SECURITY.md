@@ -6,7 +6,7 @@ If you discover a security vulnerability, please report it responsibly.
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email: security@montenegronyc.com
+Instead, please email: support@numberfortyeight.co
 
 You should receive a response within 48 hours. We will work with you to understand and address the issue before any public disclosure.
 
