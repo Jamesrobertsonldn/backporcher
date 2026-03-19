@@ -77,7 +77,11 @@ Controls how much human oversight the pipeline requires. Set via `BACKPORCHER_AP
 | `backporcher-theme.css` | Warm light theme CSS (cream/beige palette) — served by dashboard at `/theme.css`, editable without restart |
 | `src/graph/` | Code dependency graph: Tree-sitter parser, SQLite graph store, incremental update, blast radius context builder, navigation context |
 | `src/graph/context.py` | Backporcher integration layer: `ensure_graph()`, `build_review_context()`, `build_navigation_context()`, prompt injection sanitization, path traversal checks |
-| `src/dispatcher.py` | Worktree setup, credential sync, navigation context generation, agent execution (structured prompt: stack + learnings + navigation + task), build verification, PR creation, coordinator review runner (with graph context), CI retry, transient failure auto-retry, stack detection, learning loop |
+| `src/git_ops.py` | Git operations: `run_cmd`, `clone_or_fetch`, `setup_worktree`, `cleanup_task_artifacts`, URL validation, branch naming, repo locks |
+| `src/agent.py` | Agent execution: `run_agent`, `run_verify`, prompt templates, navigation context, stack detection, learnings |
+| `src/triage.py` | Issue triage: `triage_issue`, `orchestrate_batch`, `check_task_conflict`, prompt templates |
+| `src/review.py` | Coordinator review: `run_review`, `create_pr`, review prompt template |
+| `src/dispatcher.py` | Main orchestrator: `dispatch_task`, credential sync, retry logic, failure handling. Re-exports from split modules for backward compatibility |
 | `src/db.py` | SQLite with WAL mode, schema migrations (v1→v8), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
 | `src/notifications.py` | Webhook notifications (Slack/Discord compatible), fire-and-forget with 5s timeout |
 | `src/config.py` | `Config` dataclass populated from environment variables |
