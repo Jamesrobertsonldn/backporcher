@@ -50,6 +50,7 @@ class Config:
     dashboard_port: int = 8080
     dashboard_host: str = "127.0.0.1"
     dashboard_password: str | None = None
+    dashboard_skip_auth: bool = False  # Skip auth when behind a reverse proxy (e.g. Caddy)
 
     # Webhooks
     webhook_url: str | None = None
@@ -86,6 +87,7 @@ def load_config() -> Config:
         dashboard_port=int(os.environ.get("BACKPORCHER_DASHBOARD_PORT", "8080")),
         dashboard_host=os.environ.get("BACKPORCHER_DASHBOARD_HOST", "127.0.0.1"),
         dashboard_password=os.environ.get("BACKPORCHER_DASHBOARD_PASSWORD") or None,
+        dashboard_skip_auth=os.environ.get("BACKPORCHER_DASHBOARD_SKIP_AUTH", "").lower() in ("true", "1", "yes"),
         webhook_url=os.environ.get("BACKPORCHER_WEBHOOK_URL") or None,
         webhook_events=tuple(
             e.strip() for e in os.environ.get("BACKPORCHER_WEBHOOK_EVENTS", "hold,failed").split(",") if e.strip()

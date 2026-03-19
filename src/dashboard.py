@@ -233,7 +233,8 @@ async def start_dashboard(db: Database, config: Config):
         tasks_handler,
     )
 
-    app = web.Application(middlewares=[auth_middleware(config.dashboard_password)])
+    password = None if config.dashboard_skip_auth else config.dashboard_password
+    app = web.Application(middlewares=[auth_middleware(password)])
     app["db"] = db
     app["config"] = config
     app["github_owner"] = config.github_owner
