@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1085,18 +1086,36 @@ class WorkerDaemon:
                 log.warning("Force-cancelling task")
                 t.cancel()
 
-        await self.db.close()
         log.info("Worker daemon stopped")
 
 
 async def _run_worker():
     """Entry point for the worker daemon."""
+    # PID lock — prevent duplicate workers
+    config = load_config()
+    pid_file = config.base_dir / "data" / "backporcher.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if pid_file.exists():
+        old_pid = int(pid_file.read_text().strip())
+        try:
+            os.kill(old_pid, 0)  # Check if process is alive (signal 0 = no-op)
+            log.error("Another worker is already running (pid=%d). Exiting.", old_pid)
+            return
+        except ProcessLookupError:
+            log.warning("Removing stale PID file (pid=%d no longer running)", old_pid)
+            pid_file.unlink()
+        except PermissionError:
+            log.error("Another worker is running as a different user (pid=%d). Exiting.", old_pid)
+            return
+
+    pid_file.write_text(str(os.getpid()))
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    config = load_config()
     config.repos_dir.mkdir(parents=True, exist_ok=True)
     config.logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1111,14 +1130,33 @@ async def _run_worker():
             "UPDATE tasks SET status = 'pr_created', review_summary = NULL WHERE status = 'reviewing' RETURNING id"
         ) as cur:
             recovered_reviewing = [r[0] for r in await cur.fetchall()]
-        # Working → queued (re-dispatch)
+        # Working tasks — check if agent PID is still alive before resetting
         async with db.db.execute(
-            "UPDATE tasks SET status = 'queued', started_at = NULL, "
-            "error_message = NULL, agent_pid = NULL, branch_name = NULL, "
-            "worktree_path = NULL "
-            "WHERE status = 'working' RETURNING id"
+            "SELECT id, agent_pid FROM tasks WHERE status = 'working'"
         ) as cur:
-            recovered_working = [r[0] for r in await cur.fetchall()]
+            working_tasks = await cur.fetchall()
+
+        recovered_working = []
+        for task_row in working_tasks:
+            task_id, agent_pid = task_row[0], task_row[1]
+            pid_alive = False
+            if agent_pid:
+                try:
+                    os.kill(agent_pid, 0)
+                    pid_alive = True
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+            if pid_alive:
+                log.info("Task #%d agent still running (pid=%d), leaving as working", task_id, agent_pid)
+            else:
+                await db.db.execute(
+                    "UPDATE tasks SET status = 'queued', started_at = NULL, "
+                    "error_message = NULL, agent_pid = NULL, branch_name = NULL, "
+                    "worktree_path = NULL WHERE id = ?",
+                    (task_id,),
+                )
+                recovered_working.append(task_id)
         await db.db.commit()
     if recovered_reviewing:
         log.info("Recovered %d stale reviewing tasks: %s", len(recovered_reviewing), recovered_reviewing)
@@ -1186,10 +1224,24 @@ async def _run_worker():
     daemon = WorkerDaemon(config, db)
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(daemon.shutdown()))
 
-    await daemon.run()
+    def _request_shutdown():
+        log.info("Received shutdown signal")
+        asyncio.create_task(daemon.shutdown())
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _request_shutdown)
+
+    try:
+        await daemon.run()
+    finally:
+        # Clean up PID file
+        try:
+            pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        await db.close()
+        log.info("Worker shutdown complete")
 
 
 def run_worker():
