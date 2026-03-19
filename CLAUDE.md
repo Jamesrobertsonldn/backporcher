@@ -68,30 +68,70 @@ Controls how much human oversight the pipeline requires. Set via `BACKPORCHER_AP
 
 ## Key Files
 
+All Python modules are under 300 lines (soft ceiling 450 for justified cases like single-class files).
+
+### Core Pipeline
 | File | Purpose |
 |------|---------|
-| `src/constants.py` | Centralized constants — timeouts, process limits (prlimit), truncation lengths, sandbox env vars, `prlimit_args()` helper |
-| `src/cli.py` | CLI entry point: `fleet`, `status`, `stats`, `cancel`, `cleanup`, `approve`, `hold`, `release`, `pause`, `resume`, `repo` (incl. `learnings`), `worker` |
-| `src/worker.py` | Background daemon — 6 async loops, graceful shutdown, startup recovery, preflight checks |
-| `src/dashboard.py` | aiohttp web dashboard: HTTP Basic Auth, SSE real-time updates, JSON API, warm light theme (cream/beige, CSS in backporcher-theme.css), task control (approve/hold/reject/edit/requeue/escalate) |
-| `backporcher-theme.css` | Warm light theme CSS (cream/beige palette) — served by dashboard at `/theme.css`, editable without restart |
-| `src/graph/` | Code dependency graph: Tree-sitter parser, SQLite graph store, incremental update, blast radius context builder, navigation context |
-| `src/graph/context.py` | Backporcher integration layer: `ensure_graph()`, `build_review_context()`, `build_navigation_context()`, prompt injection sanitization, path traversal checks |
-| `src/git_ops.py` | Git operations: `run_cmd`, `clone_or_fetch`, `setup_worktree`, `cleanup_task_artifacts`, URL validation, branch naming, repo locks |
-| `src/agent.py` | Agent execution: `run_agent`, `run_verify`, prompt templates, navigation context, stack detection, learnings |
-| `src/triage.py` | Issue triage: `triage_issue`, `orchestrate_batch`, `check_task_conflict`, prompt templates |
-| `src/review.py` | Coordinator review: `run_review`, `create_pr`, review prompt template |
-| `src/dispatcher.py` | Main orchestrator: `dispatch_task`, credential sync, retry logic, failure handling. Re-exports from split modules for backward compatibility |
-| `src/db.py` | SQLite with WAL mode, schema migrations (v1→v8), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
-| `src/notifications.py` | Webhook notifications (Slack/Discord compatible), fire-and-forget with 5s timeout |
+| `src/dispatch.py` | Main orchestrator: `dispatch_task()` lifecycle — worktree setup, agent execution, verify, PR creation, error recovery |
+| `src/dispatch_helpers.py` | `_mark_issue_failed`, `sync_agent_credentials`, `_pick_retry_model`, `retry_with_ci_context` |
+| `src/dispatcher.py` | Re-export hub for backward compatibility (worker.py, cli.py, tests import from here) |
+| `src/agent.py` | `run_agent()`, `run_verify()` — sandboxed agent subprocess execution |
+| `src/navigation.py` | `generate_navigation_context()` — sonnet + code graph → file map for agents |
+| `src/review.py` | `run_review()`, `create_pr()` — coordinator review with blast radius analysis |
+| `src/triage.py` | `triage_issue()`, `orchestrate_batch()`, `check_task_conflict()` — issue→task creation |
+| `src/repo_intel.py` | `detect_stack()`, `record_learning()`, `get_learnings_text()` — per-repo intelligence |
+| `src/prompts.py` | All prompt templates: agent, navigation, triage, batch orchestration, conflict check, review |
+
+### Worker Daemon
+| File | Purpose |
+|------|---------|
+| `src/worker.py` | `WorkerDaemon` class with thin loop wrappers, `run_worker()` entry point |
+| `src/worker_startup.py` | PID lock, stale task recovery (checks PID alive), preflight checks |
+| `src/worker_poller.py` | Issue polling, batch task creation, claim-and-dispatch logic |
+| `src/worker_review.py` | Coordinator review loop — approve/reject handling |
+| `src/worker_ci.py` | CI monitoring, failure retry with logs, cleanup of terminal tasks |
+| `src/worker_merge.py` | PR merge, issue close, duration tracking, merge approval |
+
+### Dashboard
+| File | Purpose |
+|------|---------|
+| `src/dashboard.py` | App factory, auth middleware, worker process management, route registration |
+| `src/dashboard_sse.py` | SSE handler, status/tasks/stats endpoints |
+| `src/dashboard_actions.py` | Task mutation handlers: approve, hold, reject, edit, requeue, escalate |
+| `src/dashboard_api.py` | Operational handlers: dispatch, create task, worker start/stop, pause/resume |
+| `static/index.html` | Dashboard HTML/JS template (served from disk) |
+| `backporcher-theme.css` | Warm light theme CSS (cream/beige) — served at `/theme.css`, editable without restart |
+
+### CLI
+| File | Purpose |
+|------|---------|
+| `src/cli.py` | `main()` argparse entry point, `cmd_worker()` |
+| `src/cli_tasks.py` | `cmd_fleet`, `cmd_status`, `cmd_cancel`, `cmd_cleanup` |
+| `src/cli_control.py` | `cmd_approve`, `cmd_hold`, `cmd_release`, `cmd_pause`, `cmd_resume` |
+| `src/cli_repo.py` | `cmd_repo_add`, `cmd_repo_list`, `cmd_repo_verify`, `cmd_repo_learnings` |
+| `src/cli_stats.py` | `cmd_stats` — pipeline performance reporting |
+
+### Data Layer
+| File | Purpose |
+|------|---------|
+| `src/db.py` | Async `Database` class — SQLite with WAL mode, write lock for concurrency |
+| `src/db_sync.py` | Sync `SyncDatabase` class — used by CLI commands only |
+| `src/db_schema.py` | Schema version constants, DDL strings for v1-v3 |
+| `src/db_migrations.py` | `_migrate_sync()`, `_init_and_migrate_sync()` — v1→v8 migration runner |
+
+### Infrastructure
+| File | Purpose |
+|------|---------|
+| `src/constants.py` | Centralized constants — timeouts, process limits, truncation lengths, `prlimit_args()` |
 | `src/config.py` | `Config` dataclass populated from environment variables |
-| `src/github.py` | All `gh` CLI wrappers — issues, labels, PRs, CI status, diffs, comments, merge, close. Runs as `administrator`, never sandboxed |
-| `backporcher.service.example` | systemd unit template with security hardening directives |
-| `backporcher-dashboard.service.example` | Standalone dashboard systemd unit template |
-| `scripts/configure.sh` | Generates local `.service` files from `.example` templates |
+| `src/github.py` | GitHub issue operations via `gh` CLI — find, claim, label, comment, close |
+| `src/github_base.py` | Shared GitHub utilities — `_run_gh()`, dataclasses, URL parsing |
+| `src/github_pr.py` | GitHub PR operations — CI status, diff, merge, comment, close |
+| `src/notifications.py` | Webhook notifications (Slack/Discord compatible), fire-and-forget |
+| `src/graph/` | Code dependency graph: Tree-sitter parser, SQLite store, blast radius BFS |
 | `scripts/start-dashboard.sh` | Dashboard startup script — loads password from systemd credentials |
 | `scripts/setup-sandbox.sh` | One-time idempotent setup for `backporcher-agent` sandbox user |
-| `HANDOFF.md` | Session handoff document with current status |
 
 ## Database
 
@@ -129,6 +169,7 @@ All config via environment variables (see `src/config.py`):
 | `BACKPORCHER_DASHBOARD_PORT` | `8080` | Dashboard web server port |
 | `BACKPORCHER_DASHBOARD_HOST` | `127.0.0.1` | Dashboard bind address |
 | `BACKPORCHER_DASHBOARD_PASSWORD` | (none) | Dashboard password — dashboard disabled if unset |
+| `BACKPORCHER_DASHBOARD_SKIP_AUTH` | `false` | Skip dashboard auth when behind a reverse proxy (e.g. Caddy) |
 | `BACKPORCHER_WEBHOOK_URL` | (none) | Webhook URL for notifications (Slack/Discord compatible) |
 | `BACKPORCHER_WEBHOOK_EVENTS` | `hold,failed` | Comma-separated events: `hold`, `failed`, `completed`, `paused` |
 
@@ -156,9 +197,10 @@ Only issues created by users in `BACKPORCHER_ALLOWED_USERS` are picked up. Preve
 
 ## Self-Healing Features
 
-1. **Idempotent branch cleanup** — Before creating a worktree, deletes any stale branch from a previous attempt. Re-queuing a failed task always works.
-2. **Startup recovery** — On daemon start, `working` tasks are reset to `queued` and `reviewing` tasks to `pr_created`. No manual intervention needed after crashes.
-3. **Credential auto-sync** — Before each dispatch, compares admin vs agent credential file mtimes. If admin's are newer, auto-copies to agent user.
+1. **PID lock** — Worker writes `data/backporcher.pid` on startup, checks for stale/live PIDs, prevents duplicate workers that cause SQLite contention.
+2. **Idempotent branch cleanup** — Before creating a worktree, deletes any stale branch from a previous attempt. Re-queuing a failed task always works.
+3. **Smart startup recovery** — On daemon start, checks if agent PIDs are still alive before resetting tasks. Tasks with live agents stay `working`; only dead agents get re-queued. `reviewing` tasks reset to `pr_created`.
+4. **Credential auto-sync** — Before each dispatch, compares admin vs agent credential file mtimes. If admin's are newer, auto-copies to agent user.
 4. **Agent failure auto-retry** — Any non-zero agent exit code triggers re-queue with model escalation (sonnet → opus), up to `max_task_retries` (default 3). Stale branches are cleaned up idempotently before each dispatch.
 5. **PR number backfill** — If `pr_number` is NULL but `pr_url` exists, the coordinator extracts it automatically. Never blocks on missing data.
 6. **Startup preflight** — Clones or fetches all registered repos, verifies agent user can access repos directory, and syncs credentials before entering poll loops.
@@ -259,15 +301,15 @@ IMPORTANT: You are running non-interactively...
 
 ### Stack Detection
 
-`detect_stack()` in dispatcher.py inspects project files (`package.json`, `pyproject.toml`, `Cargo.toml`, etc.) and stores the result in `repos.stack_info`. Runs during preflight and before each dispatch if not yet detected. Shows in `backporcher repo list`.
+`detect_stack()` in repo_intel.py inspects project files (`package.json`, `pyproject.toml`, `Cargo.toml`, etc.) and stores the result in `repos.stack_info`. Runs during preflight and before each dispatch if not yet detected. Shows in `backporcher repo list`.
 
 ### Learning Loop
 
-`record_learning()` captures outcomes at 5 terminal points: agent failure (retries exhausted), verify failure, coordinator rejection, CI failure (retries exhausted), and successful merge. `get_learnings_text()` formats the last 10 as a prompt section. Stored in `repo_learnings` table, queryable via `backporcher repo learnings <name>`.
+`record_learning()` in repo_intel.py captures outcomes at 5 terminal points: agent failure (retries exhausted), verify failure, coordinator rejection, CI failure (retries exhausted), and successful merge. `get_learnings_text()` formats the last 10 as a prompt section. Stored in `repo_learnings` table, queryable via `backporcher repo learnings <name>`.
 
 ### Navigation Context
 
-Before the work agent starts, `generate_navigation_context()` in dispatcher.py:
+Before the work agent starts, `generate_navigation_context()` in navigation.py:
 1. Calls `ensure_graph()` (pre-built in preflight, incremental update if already exists)
 2. Calls `build_navigation_context()` in graph/context.py — extracts keywords from task prompt, runs `search_nodes()` + `get_impact_radius(depth=1)` to find relevant files/symbols
 3. Calls sonnet (single-shot, 60s timeout) to distill raw graph data into a curated file map with rationale
