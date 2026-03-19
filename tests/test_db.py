@@ -47,7 +47,7 @@ class TestSchemaMigration:
 
         # Should be latest version
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 7
+        assert cur.fetchone()[0] == 8
 
         # Should have all columns across all migrations
         cur = db.db.execute("PRAGMA table_info(tasks)")
@@ -84,7 +84,7 @@ class TestSchemaMigration:
 
         # Version upgraded to latest
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 7
+        assert cur.fetchone()[0] == 8
 
         # Data preserved
         cur = db.db.execute("SELECT COUNT(*) FROM tasks")
@@ -124,7 +124,7 @@ class TestSchemaMigration:
         db.connect()
 
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 7
+        assert cur.fetchone()[0] == 8
 
         cur = db.db.execute("SELECT COUNT(*) FROM tasks")
         assert cur.fetchone()[0] == 2

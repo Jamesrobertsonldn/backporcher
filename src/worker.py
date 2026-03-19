@@ -13,8 +13,10 @@ from .dispatcher import (
     check_task_conflict,
     cleanup_task_artifacts,
     clone_or_fetch,
+    detect_and_store_stack,
     dispatch_task,
     orchestrate_batch,
+    record_learning,
     retry_with_ci_context,
     run_review,
     sync_agent_credentials,
@@ -560,6 +562,14 @@ class WorkerDaemon:
                                 error_message=f"Coordinator rejected (retries exhausted): {summary[:500]}",
                             )
 
+                            await record_learning(
+                                self.db,
+                                task["repo_id"],
+                                task_id,
+                                "coordinator_rejection",
+                                f"Coordinator rejected: {summary[:200]}",
+                            )
+
                             cascaded = await self.db.handle_dependency_failure(task_id)
                             if cascaded:
                                 log.info("Task #%d rejection cascaded to tasks: %s", task_id, cascaded)
@@ -730,6 +740,13 @@ class WorkerDaemon:
                 await self.db.update_task(task_id, status="completed", completed_at=now)
                 await self.db.add_log(task_id, f"PR #{pr_number} merged (squash)")
                 log.info("Task #%d: PR #%d merged", task_id, pr_number)
+                await record_learning(
+                    self.db,
+                    task["repo_id"],
+                    task_id,
+                    "success",
+                    f"Successfully merged: {task.get('prompt', '')[:200]}",
+                )
 
                 # Record merge metric
                 try:
@@ -835,6 +852,13 @@ class WorkerDaemon:
             await self.db.update_task(task_id, status="completed", completed_at=now)
             await self.db.add_log(task_id, f"PR #{pr_number} merged (squash)")
             log.info("Task #%d: PR #%d merged", task_id, pr_number)
+            await record_learning(
+                self.db,
+                task["repo_id"],
+                task_id,
+                "success",
+                f"Successfully merged: {task.get('prompt', '')[:200]}",
+            )
 
             # Record merge metric
             try:
@@ -967,6 +991,13 @@ class WorkerDaemon:
                 level="error",
             )
             log.warning("Task #%d: CI failed, max retries exhausted", task_id)
+            await record_learning(
+                self.db,
+                task["repo_id"],
+                task_id,
+                "ci_failure",
+                f"CI failed ({', '.join(ci.failed_checks[:3])}) on: {task.get('prompt', '')[:200]}",
+            )
 
             issue_num = task.get("github_issue_number")
             if issue_num:
@@ -1115,6 +1146,7 @@ async def _run_worker():
         for repo in repos:
             try:
                 await clone_or_fetch(repo, config)
+                await detect_and_store_stack(repo, db)
                 log.info("Repo synced: %s", repo["name"])
             except Exception as e:
                 log.error("Failed to sync repo %s: %s", repo["name"], e)

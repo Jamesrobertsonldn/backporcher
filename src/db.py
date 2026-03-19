@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiosqlite
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -188,6 +188,17 @@ CREATE TABLE IF NOT EXISTS metrics (
 
 CREATE INDEX IF NOT EXISTS idx_metrics_event ON metrics(event);
 CREATE INDEX IF NOT EXISTS idx_metrics_created_at ON metrics(created_at);
+
+CREATE TABLE IF NOT EXISTS repo_learnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id INTEGER NOT NULL REFERENCES repos(id),
+    task_id INTEGER,
+    learning_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_learnings_repo ON repo_learnings(repo_id);
 """)
         conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -324,6 +335,27 @@ CREATE INDEX IF NOT EXISTS idx_metrics_created_at ON metrics(created_at);
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         conn.commit()
 
+    if version < 8:
+        # v8: add stack_info to repos + repo_learnings table
+        try:
+            conn.execute("ALTER TABLE repos ADD COLUMN stack_info TEXT")
+        except Exception:
+            pass  # Column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS repo_learnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL REFERENCES repos(id),
+                task_id INTEGER,
+                learning_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_repo_learnings_repo ON repo_learnings(repo_id)")
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        conn.commit()
+
 
 def _init_and_migrate_sync(db_path: Path):
     """Initialize base tables and run migration using a sync connection."""
@@ -339,6 +371,7 @@ CREATE TABLE IF NOT EXISTS repos (
     local_path TEXT NOT NULL,
     default_branch TEXT DEFAULT 'main',
     verify_command TEXT,
+    stack_info TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -421,7 +454,7 @@ class Database:
                 return cur.lastrowid
 
     async def update_repo(self, repo_id: int, **fields):
-        allowed = {"verify_command", "default_branch"}
+        allowed = {"verify_command", "default_branch", "stack_info"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return
@@ -769,6 +802,31 @@ class Database:
             rows.reverse()  # Oldest first for display
             return rows
 
+    # --- Learnings ---
+
+    async def add_learning(
+        self,
+        repo_id: int,
+        learning_type: str,
+        content: str,
+        task_id: int | None = None,
+    ):
+        async with self._write_lock:
+            await self.db.execute(
+                "INSERT INTO repo_learnings (repo_id, task_id, learning_type, content) VALUES (?, ?, ?, ?)",
+                (repo_id, task_id, learning_type, content),
+            )
+            await self.db.commit()
+
+    async def get_learnings(self, repo_id: int, limit: int = 10) -> list[dict]:
+        async with self.db.execute(
+            "SELECT * FROM repo_learnings WHERE repo_id = ? ORDER BY created_at DESC LIMIT ?",
+            (repo_id, limit),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+            rows.reverse()  # Oldest first
+            return rows
+
 
 class SyncDatabase:
     """Synchronous SQLite wrapper for CLI commands (no event loop needed)."""
@@ -794,6 +852,7 @@ CREATE TABLE IF NOT EXISTS repos (
     local_path TEXT NOT NULL,
     default_branch TEXT DEFAULT 'main',
     verify_command TEXT,
+    stack_info TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -845,7 +904,7 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
         return cur.lastrowid
 
     def update_repo(self, repo_id: int, **fields):
-        allowed = {"verify_command", "default_branch"}
+        allowed = {"verify_command", "default_branch", "stack_info"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return
@@ -1027,3 +1086,14 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
     def count_queued(self) -> int:
         cur = self.db.execute("SELECT COUNT(*) FROM tasks WHERE status = 'queued'")
         return cur.fetchone()[0]
+
+    # --- Learnings ---
+
+    def get_learnings(self, repo_id: int, limit: int = 20) -> list[dict]:
+        cur = self.db.execute(
+            "SELECT * FROM repo_learnings WHERE repo_id = ? ORDER BY created_at DESC LIMIT ?",
+            (repo_id, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        rows.reverse()  # Oldest first
+        return rows

@@ -52,7 +52,8 @@ def cmd_repo_list(args):
         return
     for r in repos:
         verify = f"  verify: {r['verify_command']}" if r.get("verify_command") else ""
-        print(f"  {r['id']:3d}  {r['name']:<20s}  {r['github_url']}{verify}")
+        stack = f"  [{r['stack_info']}]" if r.get("stack_info") else ""
+        print(f"  {r['id']:3d}  {r['name']:<20s}  {r['github_url']}{stack}{verify}")
     db.close()
 
 
@@ -70,6 +71,34 @@ def cmd_repo_verify(args):
         print(f"Set verify command for '{args.name}': {command}")
     else:
         print(f"Cleared verify command for '{args.name}'")
+    db.close()
+
+
+def cmd_repo_learnings(args):
+    db = get_db()
+    repo = db.get_repo_by_name(args.name)
+    if not repo:
+        print(f"Repo '{args.name}' not found")
+        sys.exit(1)
+
+    learnings = db.get_learnings(repo["id"], limit=20)
+    if not learnings:
+        print(f"No learnings recorded for '{args.name}'")
+        db.close()
+        return
+
+    print(f"Learnings for '{args.name}' ({len(learnings)} entries):")
+    for entry in learnings:
+        icon = {
+            "success": "+",
+            "agent_failure": "!",
+            "verify_failure": "!",
+            "ci_failure": "!",
+            "coordinator_rejection": "!",
+        }.get(entry["learning_type"], "-")
+        task_ref = f" (task #{entry['task_id']})" if entry.get("task_id") else ""
+        ts = entry["created_at"].split("T")[0] if "T" in entry["created_at"] else entry["created_at"][:10]
+        print(f"  [{icon}] {ts}{task_ref}  {entry['content']}")
     db.close()
 
 
@@ -675,6 +704,9 @@ def main():
     repo_verify.add_argument("name", help="Repo name")
     repo_verify.add_argument("verify_cmd", nargs="*", help="Verify command (omit to clear)")
 
+    repo_learnings = repo_sub.add_parser("learnings", help="Show recorded learnings for a repo")
+    repo_learnings.add_argument("name", help="Repo name")
+
     # fleet
     sub.add_parser("fleet", help="Fleet dashboard — active work overview")
 
@@ -718,6 +750,8 @@ def main():
             cmd_repo_list(args)
         elif args.repo_command == "verify":
             cmd_repo_verify(args)
+        elif args.repo_command == "learnings":
+            cmd_repo_learnings(args)
         else:
             repo_parser.print_help()
     elif args.command == "fleet":
