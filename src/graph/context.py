@@ -96,6 +96,163 @@ async def ensure_graph(repo_path: Path) -> GraphStore | None:
         return None
 
 
+# Stopwords for keyword extraction from task prompts
+_STOPWORDS = frozenset(
+    "a an the is are was were be been being have has had do does did will would "
+    "shall should may might can could must need to of in on at by for with from "
+    "and or not but if then else when that this these those it its as so than "
+    "into onto upon about up down out off over under between through during "
+    "before after above below all each every both few many much more most some "
+    "any no such only own same just also very too quite rather already still "
+    "even back again further once here there where how what which who whom why "
+    "add fix update remove delete change create implement modify refactor "
+    "make sure ensure please".split()
+)
+
+
+def _extract_keywords(prompt: str) -> list[str]:
+    """Extract likely code identifiers and file paths from a task prompt."""
+    # Split on whitespace and common punctuation (keep . / _ for paths/identifiers)
+    tokens = re.split(r"[,;:!?\"\'\(\)\[\]\{\}\s]+", prompt)
+    keywords = []
+    seen = set()
+    for token in tokens:
+        # Strip trailing punctuation
+        token = token.strip(".")
+        if not token or len(token) < 2:
+            continue
+        lower = token.lower()
+        if lower in _STOPWORDS:
+            continue
+        # Keep: file paths, identifiers (snake_case, camelCase, PascalCase), dotted names
+        is_path = "/" in token or token.endswith((".py", ".ts", ".js", ".rs", ".go", ".java", ".tsx", ".jsx"))
+        is_identifier = "_" in token or (any(c.isupper() for c in token[1:]) and any(c.islower() for c in token))
+        is_dotted = "." in token and not token.startswith(".")
+        # Also keep any token that's mostly alphanumeric and > 3 chars
+        is_word = len(token) > 3 and token.replace("_", "").replace("-", "").isalnum()
+        if is_path or is_identifier or is_dotted or is_word:
+            if lower not in seen:
+                seen.add(lower)
+                keywords.append(token)
+    return keywords[:30]  # Cap at 30 keywords
+
+
+def build_navigation_context(
+    store: "GraphStore",
+    task_prompt: str,
+    repo_path: Path,
+    max_results: int = 20,
+) -> dict | None:
+    """Query the code graph for files/symbols relevant to a task prompt.
+
+    Returns a structured dict with matched and related files, or None on failure.
+    This is a synchronous function (graph queries are CPU-bound, not IO).
+    """
+    try:
+        keywords = _extract_keywords(task_prompt)
+        if not keywords:
+            return None
+
+        # Search for matching nodes
+        matched_nodes = []
+        seen_qualified = set()
+        for kw in keywords:
+            results = store.search_nodes(kw, limit=5)
+            for node in results:
+                if node.qualified_name not in seen_qualified:
+                    seen_qualified.add(node.qualified_name)
+                    matched_nodes.append(node)
+
+        if not matched_nodes:
+            return None
+
+        # Group matched nodes by file
+        matched_by_file: dict[str, list] = {}
+        for node in matched_nodes:
+            matched_by_file.setdefault(node.file_path, []).append(node)
+
+        # Get impact radius (1 hop) from matched files
+        matched_file_paths = list(matched_by_file.keys())[:max_results]
+        impact = store.get_impact_radius(matched_file_paths, max_depth=1, max_nodes=200)
+
+        repo_resolved = repo_path.resolve()
+
+        def _rel_path(abs_path: str) -> str:
+            try:
+                return str(Path(abs_path).relative_to(repo_resolved))
+            except ValueError:
+                return abs_path
+
+        # Build matched files list
+        matched_files = []
+        for fpath in matched_file_paths[:max_results]:
+            nodes = matched_by_file[fpath]
+            symbols = [_sanitize_graph_str(n.name) for n in nodes if n.kind != "File"][:8]
+            match_keywords = [
+                kw
+                for kw in keywords
+                if any(kw.lower() in n.name.lower() or kw.lower() in n.qualified_name.lower() for n in nodes)
+            ]
+            matched_files.append(
+                {
+                    "path": _rel_path(fpath),
+                    "symbols": symbols,
+                    "match_reason": f"matched: {', '.join(match_keywords[:3])}" if match_keywords else "graph match",
+                }
+            )
+
+        # Build related files (from impact radius, not in matched set)
+        matched_file_set = set(matched_file_paths)
+        related_files = []
+        # Group impacted nodes by file
+        impacted_by_file: dict[str, list] = {}
+        for node in impact.get("impacted_nodes", []):
+            if node.file_path not in matched_file_set and node.kind != "File":
+                impacted_by_file.setdefault(node.file_path, []).append(node)
+
+        for fpath, nodes in list(impacted_by_file.items())[: max_results - len(matched_files)]:
+            symbols = [_sanitize_graph_str(n.name) for n in nodes[:8]]
+            # Determine relationship type from edges
+            rel_kinds = set()
+            for edge in impact.get("edges", []):
+                if fpath in edge.source_qualified or fpath in edge.target_qualified:
+                    rel_kinds.add(edge.kind)
+            relationship = ", ".join(sorted(rel_kinds)[:3]) if rel_kinds else "dependency"
+            related_files.append(
+                {
+                    "path": _rel_path(fpath),
+                    "symbols": symbols,
+                    "relationship": relationship,
+                }
+            )
+
+        # Key edges
+        edges = []
+        for edge in impact.get("edges", [])[:30]:
+            src_short = (
+                edge.source_qualified.split("::")[-1] if "::" in edge.source_qualified else edge.source_qualified
+            )
+            tgt_short = (
+                edge.target_qualified.split("::")[-1] if "::" in edge.target_qualified else edge.target_qualified
+            )
+            edges.append(
+                {
+                    "from": _sanitize_graph_str(src_short),
+                    "to": _sanitize_graph_str(tgt_short),
+                    "kind": edge.kind,
+                }
+            )
+
+        return {
+            "matched_files": matched_files,
+            "related_files": related_files,
+            "edges": edges,
+        }
+    except Exception:
+        log.exception("Failed to build navigation context")
+        return None
+
+
 def parse_changed_files_from_diff(diff_text: str) -> list[str]:
     """Extract file paths from unified diff headers (--- a/... +++ b/...)."""
     files = set()

@@ -28,7 +28,7 @@ AGENT_PROMPT_TEMPLATE = """\
 IMPORTANT: You are running non-interactively via an automated dispatcher.
 Implement directly — do NOT give an approach summary or wait for approval.
 
-{project_context}{learnings_section}## Task
+{project_context}{learnings_section}{navigation_section}## Task
 {task_prompt}
 
 ## Execution Guidelines
@@ -36,6 +36,28 @@ Implement directly — do NOT give an approach summary or wait for approval.
 2. Run existing tests after your changes to verify nothing breaks
 3. If you get stuck, commit what you have and document what remains in a TODO comment
 4. Keep changes focused — don't refactor unrelated code
+"""
+
+NAVIGATION_PROMPT = """\
+You are a code navigation assistant. Given a task description and a dependency graph excerpt from the codebase, select the 5-15 most relevant files the developer should examine first to complete the task.
+
+For each file, list the key symbols (functions/classes) and a one-line rationale explaining why it's relevant.
+
+Output ONLY a JSON array, no markdown fences:
+[{"file": "relative/path.py", "symbols": ["func_name", "ClassName"], "why": "one-line rationale"}]
+
+## Task
+{task_prompt}
+
+## Graph Data
+### Directly Matched Files
+{matched_files}
+
+### Related Files (1-hop dependencies)
+{related_files}
+
+### Key Dependency Edges
+{edges}
 """
 
 
@@ -206,6 +228,150 @@ async def get_learnings_text(db: Database, repo_id: int) -> str | None:
         }.get(entry["learning_type"], "-")
         lines.append(f"  [{icon}] {entry['content']}")
     return "## Learnings from Previous Tasks\n" + "\n".join(lines) + "\n\n"
+
+
+async def generate_navigation_context(
+    task: dict,
+    repo_path: Path,
+    db: Database,
+    config: Config,
+) -> str | None:
+    """Use sonnet + code graph to build a navigation map for the work agent.
+
+    Returns a formatted prompt section, or None on any failure.
+    """
+    if not config.navigation_enabled:
+        return None
+
+    try:
+        from .graph import build_navigation_context, ensure_graph
+
+        store = await ensure_graph(repo_path)
+        if not store:
+            return None
+
+        # Run graph query in thread (CPU-bound)
+        nav_data = await asyncio.to_thread(build_navigation_context, store, task["prompt"], repo_path)
+        if not nav_data or not nav_data.get("matched_files"):
+            return None
+
+        # Format graph data for the navigation model
+        matched_text = "\n".join(
+            f"- {f['path']}: {', '.join(f['symbols'][:5])} ({f['match_reason']})" for f in nav_data["matched_files"]
+        )
+        related_text = (
+            "\n".join(
+                f"- {f['path']}: {', '.join(f['symbols'][:5])} (via {f['relationship']})"
+                for f in nav_data["related_files"]
+            )
+            or "(none)"
+        )
+        edges_text = (
+            "\n".join(f"- {e['from']} --[{e['kind']}]--> {e['to']}" for e in nav_data["edges"][:20]) or "(none)"
+        )
+
+        nav_prompt = NAVIGATION_PROMPT.format(
+            task_prompt=task["prompt"],
+            matched_files=matched_text,
+            related_files=related_text,
+            edges=edges_text,
+        )
+
+        # Call sonnet for navigation (single-shot, 60s timeout)
+        cmd = [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--model",
+            config.navigation_model,
+            nav_prompt,
+        ]
+
+        # Clean env (same as agent)
+        nav_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(repo_path),
+            env=nav_env,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            log.warning("Navigation context timed out for task %d", task["id"])
+            return None
+
+        if proc.returncode != 0:
+            log.warning("Navigation model failed (exit %d) for task %d", proc.returncode, task["id"])
+            return None
+
+        # Parse response — extract JSON from the output
+        output = stdout.decode(errors="replace").strip()
+
+        # claude --output-format json wraps result in {"type":"result","result":"..."}
+        try:
+            wrapper = json.loads(output)
+            if isinstance(wrapper, dict) and "result" in wrapper:
+                output = wrapper["result"]
+        except json.JSONDecodeError:
+            pass
+
+        # Strip markdown fences if model wrapped them
+        if output.startswith("```"):
+            lines = output.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            output = "\n".join(lines)
+
+        try:
+            files = json.loads(output)
+        except json.JSONDecodeError:
+            log.warning("Navigation model returned invalid JSON for task %d", task["id"])
+            return None
+
+        if not isinstance(files, list) or not files:
+            return None
+
+        # Format into prompt section (capped at ~4k chars)
+        section_lines = [
+            "## Navigation Context",
+            "These files are most relevant to your task (from dependency analysis):",
+        ]
+        total_len = sum(len(line) for line in section_lines)
+        for entry in files[:15]:
+            if not isinstance(entry, dict):
+                continue
+            fpath = entry.get("file", "")
+            symbols = entry.get("symbols", [])
+            why = entry.get("why", "")
+            sym_str = ", ".join(str(s) for s in symbols[:5]) if symbols else ""
+            line = f"  - {fpath}"
+            if sym_str:
+                line += f" — {sym_str}"
+            if why:
+                line += f"\n    Why: {why}"
+            if total_len + len(line) > 4000:
+                break
+            section_lines.append(line)
+            total_len += len(line)
+
+        if len(section_lines) <= 2:
+            return None  # No files made it through
+
+        return "\n".join(section_lines) + "\n\n"
+
+    except Exception:
+        log.debug("Failed to generate navigation context for task %d", task["id"], exc_info=True)
+        return None
 
 
 # Per-repo locks to serialize git operations (fetch/worktree) for the same repo
@@ -387,9 +553,10 @@ async def run_agent(
     Returns (exit_code, output_summary).
     Uses Max subscription — no --max-budget-usd flag.
     """
-    # Build structured prompt with stack info and learnings
+    # Build structured prompt with stack info, learnings, and navigation context
     project_context = ""
     learnings_section = ""
+    navigation_section = ""
     try:
         repo = await db.get_repo(task["repo_id"])
         if repo:
@@ -397,12 +564,20 @@ async def run_agent(
             if stack:
                 project_context = f"## Project Context\nTech stack: {stack}\n\n"
             learnings_section = await get_learnings_text(db, task["repo_id"]) or ""
+            # Generate navigation context from code graph
+            repo_path = Path(repo["local_path"])
+            if repo_path.exists():
+                nav = await generate_navigation_context(task, repo_path, db, config)
+                if nav:
+                    navigation_section = nav
+                    await db.add_log(task["id"], "Navigation context generated from code graph")
     except Exception:
         log.debug("Failed to fetch context for prompt", exc_info=True)
 
     prompt = AGENT_PROMPT_TEMPLATE.format(
         project_context=project_context,
         learnings_section=learnings_section,
+        navigation_section=navigation_section,
         task_prompt=task["prompt"],
     )
     model = task["model"]

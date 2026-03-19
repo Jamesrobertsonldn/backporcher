@@ -12,7 +12,8 @@ GitHub Issue (label: backporcher)
         → Conflict check (haiku, ~$0.001) — serializes overlapping tasks
           → Task Executor (semaphore: 2 concurrent, respects dependencies)
             → Credential sync (auto if stale)
-              → claude -p in sandboxed worktree
+            → Navigation Context (sonnet queries code graph → relevant files/symbols)
+              → claude -p in sandboxed worktree (with stack info + learnings + navigation map)
                 → Build verification (optional, per-repo)
                   → git push + gh pr create
                     → Code Graph (Tree-sitter → blast radius BFS)
@@ -27,7 +28,7 @@ GitHub Issue (label: backporcher)
 The worker daemon (`src/worker.py`) runs up to 6 async loops via `asyncio.gather()`:
 
 1. **Issue Poller** (every 30s) — scans GitHub for issues labeled `backporcher`, deduplicates (including failed tasks, excludes completed no-op tasks with no PR), batch-orchestrates 2+ issues per repo (assigns priorities, dependencies, models via haiku), creates tasks, claims issues with `backporcher-in-progress` label
-2. **Task Executor** (every 5s) — claims queued tasks (bounded by semaphore), syncs credentials, runs `claude -p` in isolated worktrees, optionally runs build verification, creates PRs. Auto-retries transient failures (auth, permissions, stale branches)
+2. **Task Executor** (every 5s) — claims queued tasks (bounded by semaphore), syncs credentials, generates navigation context (sonnet + code graph → relevant files/symbols for the agent), runs `claude -p` in isolated worktrees with structured prompt (stack info + learnings + navigation map + task), optionally runs build verification, creates PRs. Auto-retries transient failures (auth, permissions, stale branches)
 3. **Coordinator Reviewer** (every 15s) — reviews each PR diff via `claude -p`, checks for conflicts with other open PRs, approves or rejects. Backfills missing `pr_number` from `pr_url`
 4. **CI Monitor** (every 60s) — checks CI status on approved PRs, auto-merges passing PRs (squash), auto-retries failures with CI log context, closes GitHub issues on success
 5. **Artifact Cleanup** (every 5 min) — removes worktrees and remote branches for terminal tasks older than 10 minutes
@@ -69,14 +70,14 @@ Controls how much human oversight the pipeline requires. Set via `BACKPORCHER_AP
 
 | File | Purpose |
 |------|---------|
-| `src/cli.py` | CLI entry point: `fleet`, `status`, `stats`, `cancel`, `cleanup`, `approve`, `hold`, `release`, `pause`, `resume`, `repo`, `worker` |
+| `src/cli.py` | CLI entry point: `fleet`, `status`, `stats`, `cancel`, `cleanup`, `approve`, `hold`, `release`, `pause`, `resume`, `repo` (incl. `learnings`), `worker` |
 | `src/worker.py` | Background daemon — 6 async loops, graceful shutdown, startup recovery, preflight checks |
 | `src/dashboard.py` | aiohttp web dashboard: HTTP Basic Auth, SSE real-time updates, JSON API, steel glass theme (high-contrast gray), task control (approve/hold/reject/edit/requeue/escalate) |
 | `backporcher-theme.css` | CSS design tokens and classes for the steel gray dashboard theme (reference file — inlined in dashboard.py) |
-| `src/graph/` | Code dependency graph: Tree-sitter parser, SQLite graph store, incremental update, blast radius context builder |
-| `src/graph/context.py` | Backporcher integration layer: `ensure_graph()`, `build_review_context()`, prompt injection sanitization, path traversal checks |
-| `src/dispatcher.py` | Worktree setup, credential sync, agent execution, build verification, PR creation, coordinator review runner (with graph context), CI retry, transient failure auto-retry |
-| `src/db.py` | SQLite with WAL mode, schema migrations (v1→v7), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
+| `src/graph/` | Code dependency graph: Tree-sitter parser, SQLite graph store, incremental update, blast radius context builder, navigation context |
+| `src/graph/context.py` | Backporcher integration layer: `ensure_graph()`, `build_review_context()`, `build_navigation_context()`, prompt injection sanitization, path traversal checks |
+| `src/dispatcher.py` | Worktree setup, credential sync, navigation context generation, agent execution (structured prompt: stack + learnings + navigation + task), build verification, PR creation, coordinator review runner (with graph context), CI retry, transient failure auto-retry, stack detection, learning loop |
+| `src/db.py` | SQLite with WAL mode, schema migrations (v1→v8), async (`Database`) + sync (`SyncDatabase`) wrappers, write lock for concurrency |
 | `src/notifications.py` | Webhook notifications (Slack/Discord compatible), fire-and-forget with 5s timeout |
 | `src/config.py` | `Config` dataclass populated from environment variables |
 | `src/github.py` | All `gh` CLI wrappers — issues, labels, PRs, CI status, diffs, comments, merge, close. Runs as `administrator`, never sandboxed |
@@ -91,11 +92,11 @@ Controls how much human oversight the pipeline requires. Set via `BACKPORCHER_AP
 
 SQLite with WAL mode at `data/backporcher.db`. Schema version 7.
 
-**Tables:** `repos` (with `verify_command`), `tasks` (with `review_summary`, `pr_number`, `retry_count`, `priority`, `depends_on_task_id`, `hold`, `agent_started_at`, `agent_finished_at`, `model_used`, `initial_model`), `task_logs`, `metrics`, `system_state`, `schema_version`
+**Tables:** `repos` (with `verify_command`, `stack_info`), `tasks` (with `review_summary`, `pr_number`, `retry_count`, `priority`, `depends_on_task_id`, `hold`, `agent_started_at`, `agent_finished_at`, `model_used`, `initial_model`), `task_logs`, `metrics`, `repo_learnings`, `system_state`, `schema_version`
 
 **Concurrency:** All writes go through `asyncio.Lock` (`_write_lock`) to prevent SQLite write conflicts. `busy_timeout=5000ms` for reader contention. The sync wrapper (`SyncDatabase`) is used by CLI commands only.
 
-**Migrations:** Handled in `_migrate_sync()` — runs on every connect. Creates fresh v6 schema for new databases, or migrates existing v1→v2→v3→v4→v5→v6 via table recreation + ALTER TABLE.
+**Migrations:** Handled in `_migrate_sync()` — runs on every connect. Creates fresh v8 schema for new databases, or migrates existing v1→v2→…→v8 via table recreation + ALTER TABLE.
 
 **Dedup:** `get_task_by_issue()` checks all non-cancelled tasks for the same issue, preventing duplicate task creation even for failed tasks.
 
@@ -109,6 +110,8 @@ All config via environment variables (see `src/config.py`):
 | `BACKPORCHER_MAX_CONCURRENCY` | `2` | Max parallel agents (semaphore) |
 | `BACKPORCHER_DEFAULT_MODEL` | `sonnet` | Model for work agents |
 | `BACKPORCHER_COORDINATOR_MODEL` | `sonnet` | Model for PR review agent |
+| `BACKPORCHER_NAVIGATION_MODEL` | `sonnet` | Model for graph-informed navigation context |
+| `BACKPORCHER_NAVIGATION_ENABLED` | `true` | Enable/disable navigation context generation |
 | `BACKPORCHER_APPROVAL_MODE` | `review-merge` | `full-auto` / `review-merge` / `review-all` |
 | `BACKPORCHER_TASK_TIMEOUT` | `3600` | Agent hard-kill timeout (seconds) |
 | `BACKPORCHER_POLL_INTERVAL` | `30` | Issue poller interval (seconds) |
@@ -180,6 +183,7 @@ Repos can have a `verify_command` (e.g., `npm test 2>&1` or `cargo check --works
 ```bash
 backporcher repo verify <name> <command>   # Set verify command
 backporcher repo verify <name>             # Clear verify command
+backporcher repo learnings <name>          # Show recorded learnings for a repo
 ```
 
 ## GitHub Label Protocol
@@ -230,6 +234,20 @@ backporcher worker             # Run daemon foreground (for systemd)
 | `DONE` | completed |
 | `FAIL` | failed |
 | ` CXL` | cancelled |
+
+## Navigation Context (Graph-Informed Agent Guidance)
+
+Before the work agent starts, a sonnet call queries the code dependency graph to build a navigation map of relevant files and symbols. This reduces token waste on codebase exploration.
+
+**Flow:** `ensure_graph()` (pre-built in preflight) → `build_navigation_context()` (keyword extraction + graph search + 1-hop impact radius) → sonnet distills into focused file list → injected into agent prompt as `## Navigation Context`.
+
+**Structured agent prompt:** `Project Context (stack) → Learnings → Navigation Context → Task → Execution Guidelines`
+
+**Graceful fallback:** If the graph doesn't exist, the navigation call fails, or sonnet returns invalid JSON, the agent runs without navigation context (same as before). Navigation never blocks dispatch.
+
+**Cost:** ~$0.01 per task (2-3k input tokens, ~500 output tokens at sonnet pricing).
+
+**Kill switch:** Set `BACKPORCHER_NAVIGATION_ENABLED=false` to disable.
 
 ## Coordinator Review
 
@@ -303,6 +321,8 @@ pip install -e . && sudo systemctl restart backporcher
 - **Graph DB corruption:** If `.code-review-graph/graph.db` gets corrupted, delete the directory and restart — it rebuilds automatically on next review. The coordinator falls back to raw diff if the graph is unavailable.
 - **Graph build on large repos:** First `full_build()` parses all source files and can take minutes on repos with 10k+ files. Subsequent reviews use `incremental_update()` which only re-parses changed files. Files >1MB are skipped to prevent memory exhaustion.
 - **Graph prompt injection:** Function/class names from the graph flow into the coordinator prompt. Malicious names (e.g., `VERDICT_APPROVE`) are sanitized: `VERDICT` is stripped, names capped at 120 chars, graph data wrapped in `<graph-context>` untrusted-data delimiters.
+- **Navigation context cold start:** First dispatch after adding a new repo triggers graph build in preflight (can take minutes for large repos). Subsequent dispatches use incremental updates. If preflight is skipped, `generate_navigation_context()` falls back gracefully.
+- **Navigation model timeout:** The sonnet navigation call has a 60s hard timeout. If it hangs, the agent runs without navigation context. Set `BACKPORCHER_NAVIGATION_ENABLED=false` to disable entirely.
 
 ## Solutions Directory
 
@@ -328,3 +348,7 @@ backporcher worker
 ```
 
 The codebase is intentionally minimal — no ORM, no task queue library. Just asyncio + aiohttp + sqlite + Tree-sitter + subprocess + gh CLI.
+
+## Documentation Rules
+
+When committing and pushing changes that meaningfully affect project structure or functionality, always update both `README.md` and `CLAUDE.md` in the same commit. "Meaningful" means: new features, changed architecture, new config options, new CLI commands, changed file purposes, or new known gotchas. Cosmetic changes (formatting, typos, internal refactors with no API change) do not require doc updates.

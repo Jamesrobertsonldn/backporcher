@@ -4,6 +4,7 @@ import asyncio
 import logging
 import signal
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import Config, load_config
 from .db import Database
@@ -1147,6 +1148,15 @@ async def _run_worker():
             try:
                 await clone_or_fetch(repo, config)
                 await detect_and_store_stack(repo, db)
+                # Pre-build code graph so navigation context is ready for first dispatch
+                try:
+                    from .graph import ensure_graph
+
+                    repo_path = Path(repo["local_path"])
+                    if repo_path.exists():
+                        await ensure_graph(repo_path)
+                except Exception:
+                    log.warning("Failed to build code graph for %s (non-fatal)", repo["name"], exc_info=True)
                 log.info("Repo synced: %s", repo["name"])
             except Exception as e:
                 log.error("Failed to sync repo %s: %s", repo["name"], e)

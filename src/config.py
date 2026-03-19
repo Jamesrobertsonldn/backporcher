@@ -33,6 +33,10 @@ class Config:
     # Coordinator review
     coordinator_model: str = "sonnet"
 
+    # Navigation context (graph-informed agent guidance)
+    navigation_model: str = "sonnet"
+    navigation_enabled: bool = True
+
     # Build verification
     max_verify_retries: int = 2
 
@@ -74,6 +78,8 @@ def load_config() -> Config:
         ci_check_interval_seconds=int(os.environ.get("BACKPORCHER_CI_CHECK_INTERVAL", "60")),
         allowed_github_users=allowed_users,
         coordinator_model=os.environ.get("BACKPORCHER_COORDINATOR_MODEL", "sonnet"),
+        navigation_model=os.environ.get("BACKPORCHER_NAVIGATION_MODEL", "sonnet"),
+        navigation_enabled=os.environ.get("BACKPORCHER_NAVIGATION_ENABLED", "true").lower() in ("true", "1", "yes"),
         max_verify_retries=int(os.environ.get("BACKPORCHER_MAX_VERIFY_RETRIES", "2")),
         max_task_retries=int(os.environ.get("BACKPORCHER_MAX_TASK_RETRIES", "3")),
         approval_mode=os.environ.get("BACKPORCHER_APPROVAL_MODE", "review-merge"),

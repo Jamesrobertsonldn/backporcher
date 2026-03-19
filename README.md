@@ -18,14 +18,15 @@ The key insight: treat agents like junior developers. Give them isolated worktre
 GitHub Issue (label: backporcher)
   → Haiku triages complexity (sonnet vs opus)
     → Batch orchestrator assigns priorities + dependency chains
-      → Sandboxed claude -p in git worktree
-        → Build verification (optional, per-repo)
-          → PR created
-            → Code graph builds blast radius (Tree-sitter + dependency BFS)
-              → Coordinator reviews diff + impacted code for bugs, conflicts, scope
-              → CI monitor (auto-retries up to 3x with error context)
-                → Orchestrator mode: hold for approval -or- auto-merge
-                  → Issue closed
+      → Sonnet queries code graph → navigation map of relevant files/symbols
+        → Sandboxed claude -p in git worktree (with stack info + learnings + navigation map)
+          → Build verification (optional, per-repo)
+            → PR created
+              → Code graph builds blast radius (Tree-sitter + dependency BFS)
+                → Coordinator reviews diff + impacted code for bugs, conflicts, scope
+                → CI monitor (auto-retries up to 3x with error context)
+                  → Orchestrator mode: hold for approval -or- auto-merge
+                    → Issue closed
 ```
 
 For 2+ issues in the same repo, a single Haiku call batch-orchestrates all of them, assigning models, priorities, and identifying which issues must be serialized (e.g., both touching the same component).
@@ -93,6 +94,7 @@ backporcher stats              # Pipeline performance stats
 backporcher repo add <url>     # Register a GitHub repo
 backporcher repo list          # List registered repos
 backporcher repo verify <n> <cmd>  # Set build verification command
+backporcher repo learnings <name> # Show recorded learnings for a repo
 backporcher worker             # Run daemon foreground
 ```
 
@@ -116,7 +118,7 @@ Six concurrent async loops in a single process:
 | Loop | Interval | Job |
 |------|----------|-----|
 | Issue Poller | 30s | Scans GitHub for `backporcher`-labeled issues, batch-orchestrates |
-| Task Executor | 5s | Claims queued tasks, runs conflict check, dispatches agents |
+| Task Executor | 5s | Claims queued tasks, runs conflict check, generates navigation context (sonnet + code graph), dispatches agents with structured prompt |
 | Coordinator | 15s | Builds code graph, analyzes blast radius, reviews PR diffs for bugs, conflicts, scope |
 | CI Monitor | 60s | Watches CI, auto-retries with error context, merges or holds |
 | Cleanup | 5min | Removes worktrees and remote branches for terminal tasks |
@@ -138,6 +140,8 @@ All via environment variables (set in your `.service` file or shell):
 | `BACKPORCHER_ALLOWED_USERS` | (required) | Comma-separated issue author allowlist |
 | `BACKPORCHER_DEFAULT_MODEL` | `sonnet` | Default agent model |
 | `BACKPORCHER_COORDINATOR_MODEL` | `sonnet` | PR review model |
+| `BACKPORCHER_NAVIGATION_MODEL` | `sonnet` | Navigation context model (graph → file map for agents) |
+| `BACKPORCHER_NAVIGATION_ENABLED` | `true` | Enable/disable navigation context generation |
 | `BACKPORCHER_MAX_CI_RETRIES` | `3` | CI failure retries per task |
 | `BACKPORCHER_MAX_TASK_RETRIES` | `3` | Agent failure retries (escalates sonnet→opus) |
 | `BACKPORCHER_TASK_TIMEOUT` | `3600` | Agent hard-kill timeout (seconds) |
