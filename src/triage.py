@@ -17,33 +17,13 @@ from .constants import (
     TRUNCATE_TRIAGE_BODY,
     prlimit_args,
 )
+from .prompts import (
+    BATCH_ORCHESTRATE_PROMPT_TEMPLATE,
+    CONFLICT_CHECK_PROMPT_TEMPLATE,
+    TRIAGE_PROMPT_TEMPLATE,
+)
 
 log = logging.getLogger("backporcher.triage")
-
-TRIAGE_PROMPT_TEMPLATE = """\
-You are a task complexity classifier for a code agent system. Given a GitHub issue, decide which AI model should work on it.
-
-## Models Available
-- **sonnet**: Fast, cheap. Good for: bug fixes, single-file changes, config tweaks, adding a flag/parameter, documentation, straightforward implementations with clear instructions.
-- **opus**: Slower, expensive, but much more capable. Required for: multi-file refactors, architectural changes, new subsystems, state management rewrites, complex feature implementations requiring design decisions, anything involving "extract", "redesign", "rewrite", or decomposition of large files.
-
-## Issue
-**Title:** {title}
-**Body:**
-{body}
-
-## Instructions
-Analyze the issue scope and complexity. Consider:
-1. How many files will likely need changes?
-2. Does it require architectural decisions or just following instructions?
-3. Is it a patch/fix or a structural change?
-4. How much code will likely be written (< 100 lines = sonnet, > 300 lines = opus)?
-
-Respond with exactly one line in this format:
-MODEL: sonnet — {{reason}}
-or
-MODEL: opus — {{reason}}
-"""
 
 
 async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]:
@@ -121,38 +101,6 @@ async def triage_issue(title: str, body: str, config: Config) -> tuple[str, str]
 
     log.warning("Could not parse triage output, defaulting to %s: %s", config.default_model, output[:TRUNCATE_REASON])
     return config.default_model, "unparseable triage output"
-
-
-BATCH_ORCHESTRATE_PROMPT_TEMPLATE = """\
-You are a task orchestrator for a parallel code agent system. Given a batch of GitHub issues \
-for the same repository, analyze them together and produce a plan.
-
-## Models Available
-- **sonnet**: Fast, cheap. Bug fixes, single-file changes, config tweaks, docs.
-- **opus**: Slower, expensive. Multi-file refactors, architectural changes, complex features.
-
-## Issues (same repo: {repo_name})
-{issues_block}
-
-## Instructions
-For each issue, determine:
-1. **model**: "sonnet" or "opus"
-2. **priority**: integer 1 to {n_issues}. 1 = run first. No duplicates.
-3. **depends_on**: issue number this depends on, or null. Use when changes would conflict \
-or build upon another issue. Chains are fine (A -> B -> C). No circular dependencies.
-
-Rules:
-- Only set depends_on for genuine ordering requirements (file conflicts, sequential changes)
-- Independent issues can run in parallel (no dependency needed)
-- Priority reflects logical ordering: foundational changes first
-
-## Response Format
-Respond with ONLY a JSON array, no markdown fences:
-[
-  {{"issue_number": 1, "model": "sonnet", "priority": 1, "depends_on": null, "reason": "..."}},
-  {{"issue_number": 2, "model": "opus", "priority": 2, "depends_on": 1, "reason": "..."}}
-]
-"""
 
 
 async def orchestrate_batch(
@@ -285,26 +233,6 @@ async def orchestrate_batch(
             )
 
     return validated
-
-
-CONFLICT_CHECK_PROMPT_TEMPLATE = """\
-You are a task conflict detector for a parallel code agent system. Given a new task and the \
-tasks already running in the same repository, determine if they likely touch overlapping files.
-
-## New Task
-{new_task_prompt}
-
-## Currently In-Flight Tasks
-{inflight_summaries}
-
-## Instructions
-Analyze whether the new task would likely modify the same files as any in-flight task.
-Consider: same components, same modules, same config files, same test files.
-Be conservative — if there's a reasonable chance of overlap, flag it.
-
-Respond with ONLY a JSON object (no markdown fences):
-{{"conflict": true/false, "conflicting_task_id": <id>|null, "reason": "brief explanation"}}
-"""
 
 
 async def check_task_conflict(

@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from src.db import SCHEMA_V1, Database, SyncDatabase, _get_schema_version
+from src.db import Database
+from src.db_schema import SCHEMA_V1, _get_schema_version
+from src.db_sync import SyncDatabase
 
 # --- Helpers ---
 

@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backporcher Dashboard</title>
+<link rel="stylesheet" href="/theme.css">
+<!-- Theme CSS served from backporcher-theme.css -->
+<style>
+/* Page-specific overrides (if any) can go here */
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span class="header-title">Backporcher</span>
+  <div class="header-status">
+    <span class="status-live" id="sse-status">LIVE</span>
+    <span id="worker-status" class="text-muted">WORKER: OFF</span>
+    <button class="btn btn-approve" id="worker-btn" onclick="toggleWorker()">START FLEET</button>
+    <span id="held-indicator" style="display:none;color:var(--c-success)"></span>
+    <span id="paused-indicator" class="status-paused" style="display:none">PAUSED</span>
+    <button class="btn btn-pause" id="pause-btn">PAUSE</button>
+    <button class="btn btn-ghost" id="new-task-btn" onclick="openNewTaskModal()">+ TASK</button>
+  </div>
+</div>
+
+<div class="dashboard">
+  <!-- Top row: Agents | Metrics | Repos -->
+  <div class="row row-top">
+    <div class="panel">
+      <div class="panel-header">Agents</div>
+      <div id="agent-viz" class="agent-viz"></div>
+      <div id="stage-flow-container"></div>
+      <div class="panel-corners"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">Metrics</div>
+      <div class="metrics-ring-layout">
+        <!-- Hidden SVG defs for ring gradients -->
+        <svg width="0" height="0" style="position:absolute">
+          <defs>
+            <linearGradient id="ring-grad-success" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="rgba(240,96,64,0.95)" />
+              <stop offset="40%" stop-color="rgba(227,83,54,0.9)" />
+              <stop offset="100%" stop-color="rgba(196,72,48,0.8)" />
+            </linearGradient>
+            <linearGradient id="ring-grad-danger" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="rgba(184,98,58,0.95)" />
+              <stop offset="40%" stop-color="rgba(160,82,45,0.9)" />
+              <stop offset="100%" stop-color="rgba(120,60,30,0.8)" />
+            </linearGradient>
+            <!-- Bevel filter for liquid glass ring effect -->
+            <filter id="ring-bevel" x="-10%" y="-10%" width="120%" height="120%">
+              <feGaussianBlur in="SourceAlpha" stdDeviation="1.5" result="blur" />
+              <feSpecularLighting in="blur" surfaceScale="4" specularConstant="0.8" specularExponent="20" result="spec" lighting-color="rgba(255,255,255,0.6)">
+                <fePointLight x="40" y="30" z="80" />
+              </feSpecularLighting>
+              <feComposite in="spec" in2="SourceAlpha" operator="in" result="specIn" />
+              <feComposite in="SourceGraphic" in2="specIn" operator="arithmetic" k1="0" k2="1" k3="0.5" k4="0" />
+            </filter>
+          </defs>
+        </svg>
+        <div class="ring-gauge-group">
+          <div class="ring-gauge">
+            <svg viewBox="0 0 120 120" class="ring-svg">
+              <circle class="ring-center" cx="60" cy="60" r="39" />
+              <circle class="ring-track" cx="60" cy="60" r="48" />
+              <circle class="ring-fill ring-fill-success" id="ring-success" cx="60" cy="60" r="48" stroke-dasharray="0 301.6" filter="url(#ring-bevel)" />
+            </svg>
+            <div class="ring-label-inner">
+              <div class="metric-value" id="m-rate">-</div>
+            </div>
+            <div class="metric-label" style="color:var(--c-success)">Success</div>
+          </div>
+          <div class="ring-gauge">
+            <svg viewBox="0 0 120 120" class="ring-svg">
+              <circle class="ring-center" cx="60" cy="60" r="39" />
+              <circle class="ring-track ring-track-danger" cx="60" cy="60" r="48" />
+              <circle class="ring-fill ring-fill-danger" id="ring-retry" cx="60" cy="60" r="48" stroke-dasharray="0 301.6" filter="url(#ring-bevel)" />
+            </svg>
+            <div class="ring-label-inner">
+              <div class="metric-value" id="m-retry">-</div>
+            </div>
+            <div class="metric-label">Retry</div>
+          </div>
+        </div>
+        <div class="metrics-stats">
+          <div class="metric-stat">
+            <div class="metric-value" id="m-merged">-</div>
+            <div class="metric-label">Merged</div>
+          </div>
+          <div class="metric-stat">
+            <div class="metric-value" id="m-time">-</div>
+            <div class="metric-label">Avg Time</div>
+          </div>
+        </div>
+      </div>
+      <div class="panel-corners"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">Repos</div>
+      <div class="repo-rings-wrap"><div id="repo-chart" class="repo-rings"></div></div>
+      <div class="panel-corners"></div>
+    </div>
+  </div>
+
+  <!-- Fleet + Detail side by side -->
+  <div class="row row-fleet">
+    <div class="panel">
+      <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Fleet</span>
+        <div class="filter-bar" id="filter-bar"></div>
+      </div>
+      <div id="fleet-content" class="panel-scroll"></div>
+      <div class="panel-corners"></div>
+    </div>
+    <div class="panel" id="task-detail-panel">
+      <div class="panel-header">Task Detail</div>
+      <div id="task-detail-content" class="panel-scroll"><div class="empty">Select a task</div></div>
+      <div class="panel-corners"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Task Edit Modal -->
+<div class="modal-overlay" id="task-modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal panel">
+    <button class="modal-close" onclick="closeModal()">&times;</button>
+    <div class="panel-header" id="modal-title">Task</div>
+    <div id="modal-body"></div>
+    <div class="panel-corners"></div>
+  </div>
+</div>
+
+<script>
+/* ═══ Constants ═══ */
+const BADGE_MAP = {
+  queued:'wait', working:'run', pr_created:'pr', reviewing:'rev',
+  reviewed:'rvwd', ci_passed:'ok', retrying:'rty',
+  completed:'done', failed:'fail', cancelled:'cxl'
+};
+const BADGE_LABEL = {
+  queued:'WAIT', working:'RUN', pr_created:'PR', reviewing:'REV',
+  reviewed:'RVWD', ci_passed:'OK', retrying:'RTY',
+  completed:'DONE', failed:'FAIL', cancelled:'CXL'
+};
+const HOLD_MAP = {
+  merge_approval: {cls:'aprv', label:'APRV'},
+  dispatch_approval: {cls:'gate', label:'GATE'},
+  user_hold: {cls:'hold', label:'HOLD'},
+  conflict_hold: {cls:'hold', label:'CNFL'},
+};
+
+let _paused = false, _owner = '', _tasks = [], _selectedId = null, _prevIds = new Set();
+let _filter = 'all'; // 'all', 'running', 'failed', 'waiting', or a repo name
+let _repoFilter = null; // null or repo name string
+let _sortCol = 'id'; // column key to sort by
+let _sortAsc = false; // false = descending (newest first)
+
+/* ═══ Helpers ═══ */
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtDur(secs) {
+  if (!secs && secs !== 0) return '—';
+  const s = Math.round(secs), m = Math.floor(s/60), h = Math.floor(m/60);
+  if (h > 0) return h+'h '+String(m%60).padStart(2,'0')+'m';
+  return m+'m '+String(s%60).padStart(2,'0')+'s';
+}
+
+function badge(status, hold) {
+  if (hold && HOLD_MAP[hold]) {
+    const h = HOLD_MAP[hold];
+    return `<span class="badge badge-${h.cls}">${h.label}</span>`;
+  }
+  const cls = BADGE_MAP[status] || 'wait';
+  const label = BADGE_LABEL[status] || status.toUpperCase();
+  return `<span class="badge badge-${cls}">${label}</span>`;
+}
+
+function issueLink(t) {
+  if (!t.github_issue_number) return '—';
+  return `<a href="https://github.com/${_owner}/${t.repo_name||''}/issues/${t.github_issue_number}" target="_blank" onclick="event.stopPropagation()">#${t.github_issue_number}</a>`;
+}
+function prLink(t) {
+  if (!t.pr_url) return '—';
+  return `<a href="${t.pr_url}" target="_blank" onclick="event.stopPropagation()">PR#${t.pr_number||'?'}</a>`;
+}
+
+function actionBtns(t) {
+  let b = '';
+  const hold = t.hold, st = t.status;
+  const term = new Set(['completed','failed','cancelled']);
+  // Run: dispatch a single queued or failed task
+  if (st === 'queued' || st === 'failed')
+    b += `<button class="btn btn-approve" onclick="event.stopPropagation();dispatchSingle(${t.id},this)">RUN</button> `;
+  if (hold === 'merge_approval' || hold === 'dispatch_approval')
+    b += `<button class="btn btn-approve" data-id="${t.id}" data-action="approve">APPROVE</button> `;
+  if (!term.has(st) && !hold && st !== 'queued')
+    b += `<button class="btn btn-hold" data-id="${t.id}" data-action="hold">HOLD</button> `;
+  if (['working','pr_created','reviewing','reviewed','ci_passed'].includes(st))
+    b += `<button class="btn btn-reject" data-id="${t.id}" data-action="reject">REJECT</button>`;
+  return b;
+}
+
+/* ═══ Agent Visualizer ═══ */
+function renderAgentViz(tasks) {
+  const el = document.getElementById('agent-viz');
+  // Only count tasks as truly working if they don't have a hold
+  const working = tasks.filter(t => t.status === 'working' && !t.hold);
+  const roles = [
+    { name: 'Coordinator', active: false },
+    { name: 'Daemon', active: _workerRunning },
+    { name: 'Orchestrator', active: false },
+    { name: 'Agent 1', active: working.length >= 1 },
+    { name: 'Agent 2', active: working.length >= 2 },
+  ];
+  // Coordinator active if any reviewing
+  roles[0].active = tasks.some(t => t.status === 'reviewing');
+  // Orchestrator active if any queued without hold, and not paused
+  roles[2].active = !_paused && tasks.some(t => t.status === 'queued' && !t.hold);
+
+  let html = '';
+  for (const role of roles) {
+    const state = role.active ? 'active' : 'idle';
+    const labelCls = role.active ? 'agent-viz-label active-label' : 'agent-viz-label';
+    html += `<div class="agent-slot">
+      <div class="agent-orb ${state}">
+        <div class="orb-glow"></div>
+        <div class="orb-shell"></div>
+        <div class="orb-teal"></div>
+        <div class="orb-core"></div>
+        <div class="orb-caustic"></div>
+        <div class="orb-specular"></div>
+        <div class="orb-rim"></div>
+      </div>
+      <div class="${labelCls}">${role.name}</div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderStageFlow(counts) {
+  const el = document.getElementById('stage-flow-container');
+  const stages = [
+    {key:'queued', label:'Queue', cnt: counts.queued||0},
+    {key:'working', label:'Agent', cnt: counts.working||0},
+    {key:'pr_created', label:'PR', cnt: counts.pr_created||0},
+    {key:'reviewing', label:'Review', cnt: (counts.reviewing||0)+(counts.reviewed||0)},
+    {key:'ci_passed', label:'CI', cnt: (counts.ci_passed||0)+(counts.retrying||0)},
+    {key:'completed', label:'Done', cnt: counts.completed||0},
+  ];
+  let html = '<div class="stage-flow">';
+  stages.forEach((s, i) => {
+    const active = s.cnt > 0 ? (s.key === 'working' ? ' active' : ' has-tasks') : '';
+    html += `<div class="stage-col"><div class="stage-node${active}">${s.cnt}</div><div class="stage-label">${s.label}</div></div>`;
+    if (i < stages.length - 1) html += '<span class="stage-arrow">&#x25B8;</span>';
+  });
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+/* ═══ Repo Ring Gauges ═══ */
+function renderRepoChart(tasks, repoNames) {
+  const el = document.getElementById('repo-chart');
+  const repos = {};
+  // Seed all registered repos so they always appear
+  if (repoNames) for (const n of repoNames) repos[n] = {total: 0, completed: 0, failed: 0};
+  for (const t of tasks) {
+    if (t.status === 'cancelled') continue;
+    const r = t.repo_name || '?';
+    if (!repos[r]) repos[r] = {total: 0, completed: 0, failed: 0};
+    repos[r].total++;
+    if (t.status === 'completed') repos[r].completed++;
+    if (t.status === 'failed') repos[r].failed++;
+  }
+  const entries = Object.entries(repos).sort((a,b) => b[1].total - a[1].total);
+  if (!entries.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const circumference = 2 * Math.PI * 48;
+  el.innerHTML = entries.map(([name, v]) => {
+    const done = v.completed + v.failed;
+    const successRate = done > 0 ? Math.round(v.completed / done * 100) : 0;
+    const filled = circumference * successRate / 100;
+    return `<div class="repo-ring ring-gauge">
+      <svg viewBox="0 0 120 120" class="ring-svg">
+        <circle class="ring-center" cx="60" cy="60" r="39" />
+        <circle class="ring-track" cx="60" cy="60" r="48" />
+        <circle class="ring-fill ring-fill-success" cx="60" cy="60" r="48"
+          stroke-dasharray="${filled} ${circumference - filled}"
+          filter="url(#ring-bevel)" />
+      </svg>
+      <div class="ring-label-inner">
+        <div class="metric-value">${v.total}</div>
+      </div>
+      <div class="metric-label">${esc(name)}</div>
+    </div>`;
+  }).join('');
+}
+
+/* ═══ Filters ═══ */
+const FILTER_GROUPS = {
+  all: null,
+  running: new Set(['working','reviewing','retrying']),
+  failed: new Set(['failed']),
+  waiting: new Set(['queued','ci_passed']),
+  pipeline: new Set(['pr_created','reviewed']),
+  done: new Set(['completed','cancelled']),
+};
+
+function setFilter(f) {
+  _filter = f;
+  _repoFilter = null;
+  renderFilterBar();
+  renderFleet(_tasks);
+}
+
+function setRepoFilter(repo) {
+  if (_repoFilter === repo) { _repoFilter = null; } else { _repoFilter = repo; }
+  renderFilterBar();
+  renderFleet(_tasks);
+}
+
+function renderFilterBar() {
+  const bar = document.getElementById('filter-bar');
+  const repos = [...new Set(_tasks.map(t => t.repo_name))].sort();
+
+  // Count per filter
+  const counts = {};
+  for (const [k, set] of Object.entries(FILTER_GROUPS)) {
+    counts[k] = set ? _tasks.filter(t => set.has(t.status)).length : _tasks.length;
+  }
+
+  let html = '';
+  const filters = [
+    {key:'all', label:'ALL'},
+    {key:'running', label:'RUNNING', activeCls:'active-run'},
+    {key:'waiting', label:'WAITING', activeCls:'active-wait'},
+    {key:'failed', label:'FAILED', activeCls:'active-fail'},
+    {key:'pipeline', label:'PIPELINE'},
+    {key:'done', label:'DONE'},
+  ];
+  for (const f of filters) {
+    const cls = _filter === f.key ? (f.activeCls || 'active') : '';
+    const cnt = counts[f.key] || 0;
+    html += `<button class="filter-btn ${cls}" onclick="setFilter('${f.key}')">${f.label}<span class="fleet-count">${cnt}</span></button>`;
+  }
+
+  if (repos.length > 1) {
+    html += '<span class="filter-sep"></span>';
+    for (const r of repos) {
+      const cls = _repoFilter === r ? 'active' : '';
+      html += `<button class="filter-btn ${cls}" onclick="setRepoFilter('${esc(r)}')">${esc(r)}</button>`;
+    }
+  }
+
+  bar.innerHTML = html;
+}
+
+function applyFilters(tasks) {
+  let filtered = tasks;
+  const group = FILTER_GROUPS[_filter];
+  if (group) filtered = filtered.filter(t => group.has(t.status));
+  if (_repoFilter) filtered = filtered.filter(t => t.repo_name === _repoFilter);
+  return filtered;
+}
+
+/* ═══ Fleet Table ═══ */
+function toggleSort(col) {
+  if (_sortCol === col) { _sortAsc = !_sortAsc; }
+  else { _sortCol = col; _sortAsc = col === 'id' ? false : true; }
+  renderFleet(_tasks);
+}
+
+const _statusOrder = {working:0, queued:1, pr_created:2, reviewing:3, reviewed:4, retrying:5, ci_passed:6, completed:7, failed:8, cancelled:9};
+
+function sortTasks(tasks) {
+  const dir = _sortAsc ? 1 : -1;
+  return [...tasks].sort((a, b) => {
+    let av, bv;
+    switch (_sortCol) {
+      case 'id': av = a.id; bv = b.id; break;
+      case 'status': av = _statusOrder[a.status]??99; bv = _statusOrder[b.status]??99; break;
+      case 'repo': av = (a.repo_name||'').toLowerCase(); bv = (b.repo_name||'').toLowerCase(); return av < bv ? -dir : av > bv ? dir : 0;
+      case 'issue': av = a.github_issue_number||0; bv = b.github_issue_number||0; break;
+      case 'model': av = (a.model||'').toLowerCase(); bv = (b.model||'').toLowerCase(); return av < bv ? -dir : av > bv ? dir : 0;
+      case 'time': av = a.elapsed_seconds||0; bv = b.elapsed_seconds||0; break;
+      default: av = a.id; bv = b.id;
+    }
+    return (av - bv) * dir;
+  });
+}
+
+function sortHeader(col, label) {
+  const active = _sortCol === col ? ' sort-active' : '';
+  const arrow = _sortCol === col ? (_sortAsc ? '<span class="sort-arrow">&#9650;</span>' : '<span class="sort-arrow">&#9660;</span>') : '';
+  return `<th class="sortable${active}" onclick="toggleSort('${col}')">${label}${arrow}</th>`;
+}
+
+function renderFleet(tasks) {
+  const el = document.getElementById('fleet-content');
+  const filtered = applyFilters(tasks);
+
+  if (!filtered.length) {
+    const msg = _filter !== 'all' || _repoFilter ? 'No matching tasks' : 'No tasks';
+    el.innerHTML = `<div class="empty">${msg}</div>`;
+    return;
+  }
+
+  const sorted = sortTasks(filtered);
+  const newIds = new Set(sorted.map(t => t.id));
+
+  let html = '<table class="fleet-table"><thead><tr>';
+  html += sortHeader('id','ID') + sortHeader('status','Status') + sortHeader('repo','Repo');
+  html += sortHeader('issue','Issue') + '<th>PR</th>' + sortHeader('model','Model');
+  html += sortHeader('time','Time') + '<th>Actions</th>';
+  html += '</tr></thead><tbody>';
+  for (const t of sorted) {
+    const sel = t.id === _selectedId ? ' selected' : '';
+    const isNew = !_prevIds.has(t.id) && _prevIds.size > 0 ? ' new-row' : '';
+    const time = t.elapsed ? `<span class="text-cyan">${t.elapsed}</span>` : '—';
+    html += `<tr class="${sel}${isNew}" data-task-id="${t.id}" style="cursor:pointer">`;
+    html += `<td class="col-id">#${t.id}</td>`;
+    html += `<td>${badge(t.status, t.hold)}</td>`;
+    html += `<td class="col-repo">${esc(t.repo_name)}</td>`;
+    html += `<td class="col-issue">${issueLink(t)}</td>`;
+    html += `<td>${prLink(t)}</td>`;
+    html += `<td class="col-model">${esc(t.model||'')}</td>`;
+    html += `<td class="col-time">${time}</td>`;
+    html += `<td>${actionBtns(t)}</td>`;
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+
+  _prevIds = newIds;
+}
+
+/* ═══ Metrics ═══ */
+function updateMetrics(tasks) {
+  const nonCancelled = tasks.filter(t => t.status !== 'cancelled');
+  const completed = nonCancelled.filter(t => t.status === 'completed');
+  const total = nonCancelled.length;
+
+  document.getElementById('m-merged').textContent = completed.length;
+
+  const circumference = 2 * Math.PI * 48; // r=48
+  if (total > 0) {
+    const rate = Math.round(completed.length / total * 100);
+    document.getElementById('m-rate').textContent = rate + '%';
+    const ringSuccess = document.getElementById('ring-success');
+    if (ringSuccess) {
+      const filled = circumference * rate / 100;
+      ringSuccess.setAttribute('stroke-dasharray', filled + ' ' + (circumference - filled));
+    }
+  } else {
+    document.getElementById('m-rate').textContent = '—';
+  }
+
+  let mergeTimes = [];
+  for (const t of completed) {
+    if (t.completed_at && t.started_at) {
+      try {
+        const s = new Date(t.started_at), e = new Date(t.completed_at);
+        if (!isNaN(s) && !isNaN(e)) mergeTimes.push((e - s) / 1000);
+      } catch(_) {}
+    }
+  }
+  document.getElementById('m-time').textContent = mergeTimes.length ? fmtDur(mergeTimes.reduce((a,b)=>a+b,0)/mergeTimes.length) : '—';
+
+  const retries = nonCancelled.reduce((a,t) => a + (t.retry_count||0), 0);
+  const retryPct = total > 0 ? Math.round(retries/total*100) : 0;
+  document.getElementById('m-retry').textContent = total > 0 ? retryPct + '%' : '—';
+  const ringRetry = document.getElementById('ring-retry');
+  if (ringRetry) {
+    const filled = circumference * retryPct / 100;
+    ringRetry.setAttribute('stroke-dasharray', filled + ' ' + (circumference - filled));
+  }
+}
+
+/* ═══ Task Detail Panel ═══ */
+function showTaskDetail(taskId) {
+  _selectedId = taskId;
+  const panel = document.getElementById('task-detail-panel');
+  const content = document.getElementById('task-detail-content');
+  const t = _tasks.find(x => x.id == taskId);
+  if (!t) { content.innerHTML = '<div class="empty">Task not found</div>'; return; }
+
+  const terminal = new Set(['completed','failed','cancelled']);
+  const escalatable = (t.status === 'queued' || t.status === 'working') && t.model !== 'opus';
+  const requeueable = terminal.has(t.status);
+  const editable = t.status === 'queued' || t.status === 'failed' || t.hold;
+
+  let html = `<div class="task-detail-title">${esc(t.title)}</div>`;
+  html += `<div class="task-detail-meta">${esc(t.repo_name)} &middot; ${esc(t.model||'')} ${t.elapsed ? '&middot; '+t.elapsed : ''}</div>`;
+
+  // Status explanation
+  let statusText = '', isError = false;
+  if (t.hold === 'merge_approval') statusText = 'CI PASSED — awaiting merge approval';
+  else if (t.hold === 'dispatch_approval') statusText = 'Queued — awaiting dispatch approval';
+  else if (t.hold === 'user_hold') statusText = 'User hold — manually paused';
+  else if (t.error_message) { statusText = esc(t.error_message.substring(0,200)); isError = true; }
+  if (statusText) html += `<div class="task-detail-status${isError ? ' error' : ''}">${statusText}</div>`;
+
+  // Buttons
+  html += '<div class="btn-group" style="margin-top:var(--s-md)">';
+  html += actionBtns(t);
+  if (t.status === 'queued' || t.status === 'failed')
+    html += ` <button class="btn btn-approve" onclick="dispatchSingle(${t.id},this)">RUN</button>`;
+  if (escalatable) html += ` <button class="btn btn-approve" onclick="escalateTask(${t.id})">ESCALATE</button>`;
+  if (requeueable && !(editable || requeueable)) html += ` <button class="btn btn-approve" onclick="requeueTask(${t.id})">RE-QUEUE</button>`;
+  html += '</div>';
+
+  // Inline edit + requeue form for failed/editable tasks
+  if (editable || requeueable) {
+    html += `<div class="inline-edit" id="inline-edit-${t.id}">
+      <label>Prompt (edit to refine before re-queuing)</label>
+      <textarea id="ie-prompt-${t.id}">Loading full prompt...</textarea>
+      <div class="form-row">
+        <div><label>Model</label>
+          <select id="ie-model-${t.id}">
+            <option value="sonnet" ${t.model==='sonnet'?'selected':''}>sonnet</option>
+            <option value="opus" ${t.model==='opus'?'selected':''}>opus</option>
+            <option value="haiku" ${t.model==='haiku'?'selected':''}>haiku</option>
+          </select>
+        </div>
+        <div><label>Priority</label>
+          <input type="number" id="ie-pri-${t.id}" value="${t.priority||100}" style="width:80px">
+        </div>
+        <div>
+          <button class="btn btn-approve" onclick="inlineSubmit(${t.id})" id="ie-btn-${t.id}">
+            ${requeueable ? 'SAVE & RE-QUEUE' : 'SAVE & UPDATE'}
+          </button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // Timeline
+  html += `<div class="timeline" id="timeline-${t.id}"><div class="timeline-header">Timeline</div><div class="empty">Loading...</div></div>`;
+  content.innerHTML = html;
+
+  // Fetch full task data (for prompt + logs)
+  fetch('/api/tasks/' + t.id, {credentials:'include'}).then(r => r.json()).then(d => {
+    if (!d.task) return;
+    // Fill in the full prompt
+    const promptEl = document.getElementById('ie-prompt-' + t.id);
+    if (promptEl) promptEl.value = d.task.prompt || '';
+    // Render timeline
+    const logs = d.logs || [];
+    const tl = document.getElementById('timeline-' + t.id);
+    if (!tl) return;
+    if (!logs.length) { tl.innerHTML = '<div class="timeline-header">Timeline</div><div class="empty">No logs</div>'; return; }
+    let lhtml = '<div class="timeline-header">Timeline</div>';
+    for (const log of logs) {
+      const raw = (log.created_at||'').split('.')[0] || '';
+      const parts = raw.split(/[T ]/);
+      const ts = parts.length >= 2 ? parts[0].slice(5) + ' ' + parts[1] : raw;
+      const cls = log.level === 'error' ? 'text-red' : log.level === 'warn' ? 'text-amber' : '';
+      lhtml += `<div class="timeline-entry"><span class="timeline-time">${ts}</span><span class="timeline-event ${cls}">${esc(log.message.substring(0,200))}</span></div>`;
+    }
+    tl.innerHTML = lhtml;
+  }).catch(() => {});
+
+  // Highlight selected row
+  document.querySelectorAll('.fleet-table tbody tr').forEach(r => r.classList.remove('selected'));
+  const row = document.querySelector(`.fleet-table tbody tr[data-task-id="${taskId}"]`);
+  if (row) row.classList.add('selected');
+}
+
+/* ═══ Edit Modal ═══ */
+function openEditModal(id) {
+  const t = _tasks.find(x => x.id == id);
+  if (!t) return;
+  // Fetch full task data
+  fetch('/api/tasks/' + id, {credentials:'include'}).then(r => r.json()).then(d => {
+    if (!d.task) return;
+    const task = d.task;
+    const terminal = new Set(['completed','failed','cancelled']);
+    const isTerminal = terminal.has(task.status);
+
+    let html = '';
+    html += `<div class="edit-form">`;
+    html += `<label>Prompt</label><textarea id="edit-prompt">${esc(task.prompt)}</textarea>`;
+    html += `<div class="form-row">`;
+    html += `<div><label>Model</label><select id="edit-model">
+      <option value="sonnet" ${task.model==='sonnet'?'selected':''}>sonnet</option>
+      <option value="opus" ${task.model==='opus'?'selected':''}>opus</option>
+      <option value="haiku" ${task.model==='haiku'?'selected':''}>haiku</option>
+    </select></div>`;
+    html += `<div><label>Priority</label><input type="number" id="edit-priority" value="${task.priority||100}" style="width:80px"></div>`;
+    html += `<div style="padding-bottom:2px"><button class="btn btn-approve" onclick="submitEdit(${id})" style="margin-top:18px">SAVE &amp; ${isTerminal ? 'RE-QUEUE' : 'UPDATE'}</button></div>`;
+    html += `</div></div>`;
+
+    document.getElementById('modal-title').textContent = 'Edit Task #' + id;
+    document.getElementById('modal-body').innerHTML = html;
+    document.getElementById('task-modal').classList.add('open');
+  }).catch(() => {});
+}
+
+function closeModal() { document.getElementById('task-modal').classList.remove('open'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+async function submitEdit(id) {
+  const prompt = document.getElementById('edit-prompt').value;
+  const model = document.getElementById('edit-model').value;
+  const priority = parseInt(document.getElementById('edit-priority').value) || 100;
+  const t = _tasks.find(x => x.id == id);
+  const terminal = new Set(['completed','failed','cancelled']);
+  const isTerminal = t && terminal.has(t.status);
+  const url = isTerminal ? '/api/tasks/'+id+'/requeue' : '/api/tasks/'+id+'/edit';
+  try {
+    const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt,model,priority})});
+    const d = await res.json();
+    if (d.ok) { closeModal(); showTaskDetail(id); } else { alert('Failed: '+(d.error||'')); }
+  } catch(e) { alert('Error: '+e); }
+}
+
+async function inlineSubmit(id) {
+  const prompt = document.getElementById('ie-prompt-' + id)?.value;
+  const model = document.getElementById('ie-model-' + id)?.value;
+  const priority = parseInt(document.getElementById('ie-pri-' + id)?.value) || 100;
+  const btn = document.getElementById('ie-btn-' + id);
+  if (btn) { btn.textContent = '...'; btn.disabled = true; }
+
+  const t = _tasks.find(x => x.id == id);
+  const terminal = new Set(['completed','failed','cancelled']);
+  const isTerminal = t && terminal.has(t.status);
+  const url = isTerminal ? '/api/tasks/'+id+'/requeue' : '/api/tasks/'+id+'/edit';
+
+  try {
+    const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt,model,priority})});
+    const d = await res.json();
+    if (d.ok) {
+      if (btn) { btn.textContent = 'DONE'; btn.style.borderColor = 'var(--c-success)'; btn.style.color = 'var(--c-success)'; }
+      setTimeout(() => showTaskDetail(id), 1000);
+    } else {
+      alert('Failed: '+(d.error||''));
+      if (btn) { btn.textContent = isTerminal ? 'SAVE & RE-QUEUE' : 'SAVE & UPDATE'; btn.disabled = false; }
+    }
+  } catch(e) {
+    alert('Error: '+e);
+    if (btn) { btn.textContent = isTerminal ? 'SAVE & RE-QUEUE' : 'SAVE & UPDATE'; btn.disabled = false; }
+  }
+}
+
+async function dispatchSingle(id, btn) {
+  if (btn) { btn.textContent = '...'; btn.disabled = true; }
+  try {
+    const res = await fetch('/api/tasks/' + id + '/dispatch', {method:'POST', credentials:'include'});
+    if (!res.ok) {
+      const text = await res.text();
+      try { const d = JSON.parse(text); alert('Dispatch failed: ' + (d.error || res.statusText)); }
+      catch(_) { alert('Dispatch failed: ' + res.status + ' ' + res.statusText); }
+      if (btn) { btn.textContent = 'RUN'; btn.disabled = false; }
+      return;
+    }
+    const d = await res.json();
+    if (!d.ok) {
+      alert('Dispatch failed: ' + (d.error || ''));
+      if (btn) { btn.textContent = 'RUN'; btn.disabled = false; }
+    }
+    // SSE will update the row to show WORKING status
+  } catch(e) {
+    alert('Error: ' + e);
+    if (btn) { btn.textContent = 'RUN'; btn.disabled = false; }
+  }
+}
+
+async function escalateTask(id) {
+  try {
+    const res = await fetch('/api/tasks/'+id+'/escalate', {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:'opus'})});
+    const d = await res.json();
+    if (!d.ok) alert('Escalate failed: '+(d.error||''));
+  } catch(e) { alert('Error: '+e); }
+}
+
+async function requeueTask(id) {
+  if (!confirm('Re-queue task #'+id+'?')) return;
+  try {
+    const res = await fetch('/api/tasks/'+id+'/requeue', {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const d = await res.json();
+    if (!d.ok) alert('Requeue failed: '+(d.error||''));
+  } catch(e) { alert('Error: '+e); }
+}
+
+/* ═══ Event Delegation ═══ */
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.btn[data-action]');
+  if (btn) {
+    e.stopPropagation();
+    const id = btn.dataset.id, action = btn.dataset.action;
+    if (action === 'reject' && !confirm('Reject task #'+id+'?')) return;
+    const orig = btn.textContent;
+    btn.textContent = '...'; btn.disabled = true;
+    try { await fetch('/api/tasks/'+id+'/'+action, {method:'POST', credentials:'include'}); }
+    catch(err) { console.error('Action failed:', err); }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
+    return;
+  }
+
+  const pauseBtn = e.target.closest('#pause-btn');
+  if (pauseBtn) {
+    const action = _paused ? 'resume' : 'pause';
+    pauseBtn.textContent = '...'; pauseBtn.disabled = true;
+    try { await fetch('/api/'+action, {method:'POST', credentials:'include'}); }
+    catch(err) { console.error('Pause/resume failed:', err); }
+    setTimeout(() => { pauseBtn.disabled = false; }, 3000);
+    return;
+  }
+
+  const row = e.target.closest('.fleet-table tbody tr');
+  if (row && !e.target.closest('.btn') && !e.target.closest('a')) {
+    const taskId = parseInt(row.dataset.taskId);
+    if (taskId) showTaskDetail(taskId);
+  }
+});
+
+/* ═══ SSE ═══ */
+function update(data) {
+  const c = data.counts || {};
+  _paused = !!data.queue_paused;
+  _owner = data.github_owner || '';
+  _tasks = data.tasks || [];
+
+  // Header
+  const pauseBtn = document.getElementById('pause-btn');
+  const pausedInd = document.getElementById('paused-indicator');
+  const heldInd = document.getElementById('held-indicator');
+  if (_paused) {
+    pausedInd.style.display = ''; pauseBtn.textContent = 'RESUME'; pauseBtn.className = 'btn btn-resume';
+  } else {
+    pausedInd.style.display = 'none'; pauseBtn.textContent = 'PAUSE'; pauseBtn.className = 'btn btn-pause';
+  }
+  if (data.held_count > 0) {
+    heldInd.style.display = ''; heldInd.textContent = data.held_count + ' AWAITING APPROVAL';
+  } else {
+    heldInd.style.display = 'none';
+  }
+
+  // Worker status
+  const workerSt = document.getElementById('worker-status');
+  const workerBtn = document.getElementById('worker-btn');
+  _workerRunning = !!data.worker_running;
+  if (_workerRunning) {
+    workerSt.textContent = 'WORKER: PID ' + (data.worker_pid||'?');
+    workerSt.className = 'text-green';
+    workerBtn.textContent = 'STOP FLEET';
+    workerBtn.className = 'btn btn-reject';
+  } else {
+    workerSt.textContent = 'WORKER: OFF';
+    workerSt.className = 'text-muted';
+    workerBtn.textContent = 'START FLEET';
+    workerBtn.className = 'btn btn-approve';
+  }
+
+  renderAgentViz(_tasks);
+  renderStageFlow(c);
+  renderFilterBar();
+  renderFleet(_tasks);
+  updateMetrics(_tasks);
+  renderRepoChart(_tasks, data.repo_names);
+
+  // Refresh detail if visible
+  if (_selectedId) {
+    const t = _tasks.find(x => x.id === _selectedId);
+    if (t) showTaskDetail(_selectedId);
+  }
+}
+
+/* ═══ Worker Control ═══ */
+let _workerRunning = false;
+
+async function toggleWorker() {
+  const btn = document.getElementById('worker-btn');
+  const action = _workerRunning ? 'stop' : 'start';
+  if (_workerRunning && !confirm('Stop the fleet worker?')) return;
+  btn.textContent = '...'; btn.disabled = true;
+  try {
+    const res = await fetch('/api/worker/' + action, {method:'POST', credentials:'include'});
+    const d = await res.json();
+    if (!d.ok) alert(d.message || 'Failed');
+  } catch(e) { alert('Error: ' + e); }
+  setTimeout(() => { btn.disabled = false; }, 2000);
+}
+
+/* ═══ New Task Modal ═══ */
+async function openNewTaskModal() {
+  // Fetch repos for the dropdown
+  let repos = [];
+  try {
+    // Extract repo names from current tasks
+    repos = [...new Set(_tasks.map(t => t.repo_name))].sort();
+  } catch(_) {}
+
+  let repoOpts = repos.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('');
+  if (!repoOpts) repoOpts = '<option value="">No repos available</option>';
+
+  const html = `<div class="edit-form">
+    <label>Repo</label>
+    <select id="new-repo">${repoOpts}</select>
+    <label>Prompt / Issue Description</label>
+    <textarea id="new-prompt" placeholder="Describe the task for the agent..."></textarea>
+    <div class="form-row">
+      <div><label>Model</label>
+        <select id="new-model">
+          <option value="sonnet">sonnet</option>
+          <option value="opus">opus</option>
+          <option value="haiku">haiku</option>
+        </select>
+      </div>
+      <div><label>Priority</label>
+        <input type="number" id="new-priority" value="100" style="width:80px">
+      </div>
+      <div>
+        <button class="btn btn-approve" onclick="submitNewTask()" style="margin-top:18px">CREATE TASK</button>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('modal-title').textContent = 'New Task';
+  document.getElementById('modal-body').innerHTML = html;
+  document.getElementById('task-modal').classList.add('open');
+}
+
+async function submitNewTask() {
+  const repo = document.getElementById('new-repo').value;
+  const prompt = document.getElementById('new-prompt').value.trim();
+  const model = document.getElementById('new-model').value;
+  const priority = parseInt(document.getElementById('new-priority').value) || 100;
+
+  if (!prompt) { alert('Prompt is required'); return; }
+
+  try {
+    const res = await fetch('/api/tasks/create', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo, prompt, model, priority})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      closeModal();
+      // Select the new task after next SSE update
+      setTimeout(() => { if (d.task_id) showTaskDetail(d.task_id); }, 2000);
+    } else {
+      alert('Failed: ' + (d.error || ''));
+    }
+  } catch(e) { alert('Error: ' + e); }
+}
+
+function connect() {
+  const statusEl = document.getElementById('sse-status');
+  const es = new EventSource('/events');
+  es.onopen = () => { statusEl.textContent = 'LIVE'; statusEl.className = 'status-live'; };
+  es.onmessage = (e) => { try { update(JSON.parse(e.data)); } catch(err) { console.error('SSE parse error', err); } };
+  es.onerror = () => {
+    statusEl.textContent = 'RECONNECTING'; statusEl.className = 'text-red';
+    es.close(); setTimeout(connect, 3000);
+  };
+}
+connect();
+</script>
+</body>
+</html>

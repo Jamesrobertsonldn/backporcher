@@ -28,40 +28,9 @@ from .github import (
     list_open_prs,
     repo_full_name_from_url,
 )
+from .prompts import REVIEW_PROMPT_TEMPLATE
 
 log = logging.getLogger("backporcher.review")
-
-REVIEW_PROMPT_TEMPLATE = """\
-You are a code review coordinator. Your job is to review a PR created by an automated agent.
-
-## Original Task
-{task_prompt}
-
-## PR Diff
-{pr_diff}
-
-## Blast Radius Analysis
-{blast_radius}
-
-The above shows which functions, classes, and tests are affected by this change,
-including indirect dependencies. Pay special attention to impacted code that was
-NOT modified — these are potential regression points.
-
-## Other Open Backporcher PRs (same repo)
-{other_prs}
-
-## Review Criteria
-1. Does the diff actually address the task?
-2. Are there obvious bugs, regressions, or security issues?
-3. Does it conflict with any of the other open PRs listed above?
-4. Is the scope appropriate (not too broad, not touching unrelated files)?
-5. Are there indirectly impacted functions/tests (from the blast radius) that might break?
-
-## Your Response
-Analyze the PR, then end with exactly one of:
-VERDICT: APPROVE
-VERDICT: REJECT — {{one-line reason}}
-"""
 
 
 async def run_review(
