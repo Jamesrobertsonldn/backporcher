@@ -14,7 +14,6 @@ from .constants import (
     TRUNCATE_BATCH_ISSUE_BODY,
     TRUNCATE_PROMPT_FOR_REVIEW,
     TRUNCATE_REASON,
-    TRUNCATE_SUMMARY,
     TRUNCATE_TRIAGE_BODY,
     prlimit_args,
 )
@@ -214,7 +213,11 @@ async def orchestrate_batch(
 
     output = stdout.decode(errors="replace").strip()
     if proc.returncode != 0:
-        log.warning("Batch orchestration failed (exit %d): %s", proc.returncode, stderr.decode(errors="replace")[:TRUNCATE_REASON])
+        log.warning(
+            "Batch orchestration failed (exit %d): %s",
+            proc.returncode,
+            stderr.decode(errors="replace")[:TRUNCATE_REASON],
+        )
         return None
 
     # Strip markdown fences if present

@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import signal
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
@@ -26,7 +25,6 @@ from .constants import (
     prlimit_args,
 )
 from .db import Database
-from .git_ops import run_cmd
 
 log = logging.getLogger("backporcher.agent")
 
@@ -237,7 +235,8 @@ async def generate_navigation_context(
 
         # Format graph data for the navigation model
         matched_text = "\n".join(
-            f"- {f['path']}: {', '.join(f['symbols'][:NAV_MAX_SYMBOLS_PER_FILE])} ({f['match_reason']})" for f in nav_data["matched_files"]
+            f"- {f['path']}: {', '.join(f['symbols'][:NAV_MAX_SYMBOLS_PER_FILE])} ({f['match_reason']})"
+            for f in nav_data["matched_files"]
         )
         related_text = (
             "\n".join(
@@ -247,7 +246,8 @@ async def generate_navigation_context(
             or "(none)"
         )
         edges_text = (
-            "\n".join(f"- {e['from']} --[{e['kind']}]--> {e['to']}" for e in nav_data["edges"][:NAV_MAX_EDGES]) or "(none)"
+            "\n".join(f"- {e['from']} --[{e['kind']}]--> {e['to']}" for e in nav_data["edges"][:NAV_MAX_EDGES])
+            or "(none)"
         )
 
         nav_prompt = NAVIGATION_PROMPT.format(

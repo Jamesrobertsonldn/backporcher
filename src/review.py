@@ -1,11 +1,8 @@
 """Review: coordinator PR review and PR creation."""
 
 import asyncio
-import json
 import logging
 import os
-import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config

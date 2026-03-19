@@ -1,28 +1,24 @@
 """Dispatcher: task dispatch lifecycle, credential sync, retry logic."""
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Re-exports for backward compatibility (worker.py, cli.py, tests import from here)
+from .agent import AGENT_PROMPT_TEMPLATE as AGENT_PROMPT_TEMPLATE  # noqa: F811
+from .agent import detect_and_store_stack, record_learning, run_agent, run_verify
+from .agent import detect_stack as detect_stack  # noqa: F811
+from .agent import generate_navigation_context as generate_navigation_context  # noqa: F811
+from .agent import get_learnings_text as get_learnings_text  # noqa: F811
 from .config import Config
 from .constants import (
     CREDENTIAL_FILE_MODE,
     TIMEOUT_COMMIT_PUSH,
-    TRUNCATE_COMMIT_MSG,
     TRUNCATE_ERROR_MESSAGE,
     TRUNCATE_REASON,
     TRUNCATE_REVIEW_OUTPUT,
-    TRUNCATE_SUMMARY,
 )
 from .db import Database
-from .github import (
-    comment_on_issue,
-    repo_full_name_from_url,
-    update_issue_labels,
-)
-
-# Import from split modules
 from .git_ops import (
     _get_repo_lock,
     cleanup_task_artifacts,
@@ -31,25 +27,15 @@ from .git_ops import (
     make_branch_name,
     run_cmd,
     setup_worktree,
-    validate_github_url,
-    repo_name_from_url,
 )
-from .agent import (
-    AGENT_PROMPT_TEMPLATE,
-    detect_and_store_stack,
-    detect_stack,
-    generate_navigation_context,
-    get_learnings_text,
-    record_learning,
-    run_agent,
-    run_verify,
-)
-from .review import create_pr, run_review
-from .triage import (
-    check_task_conflict,
-    orchestrate_batch,
-    triage_issue,
-)
+from .git_ops import repo_name_from_url as repo_name_from_url  # noqa: F811
+from .git_ops import validate_github_url as validate_github_url  # noqa: F811
+from .github import comment_on_issue, repo_full_name_from_url, update_issue_labels
+from .review import create_pr
+from .review import run_review as run_review  # noqa: F811
+from .triage import check_task_conflict as check_task_conflict  # noqa: F811
+from .triage import orchestrate_batch as orchestrate_batch  # noqa: F811
+from .triage import triage_issue as triage_issue  # noqa: F811
 
 log = logging.getLogger("backporcher.dispatcher")
 

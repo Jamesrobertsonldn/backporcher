@@ -7,6 +7,7 @@ import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import notifications
 from .config import Config, load_config
 from .db import Database
 from .dispatcher import (
@@ -40,7 +41,6 @@ from .github import (
     repo_full_name_from_url,
     update_issue_labels,
 )
-from . import notifications
 
 log = logging.getLogger("backporcher.worker")
 
@@ -595,7 +595,9 @@ class WorkerDaemon:
 
                             # Webhook: failed
                             _title = task.get("prompt", "")[:80]
-                            await notifications.notify_failed(task_id, _title, "coordinator rejected PR (retries exhausted)")
+                            await notifications.notify_failed(
+                                task_id, _title, "coordinator rejected PR (retries exhausted)"
+                            )
 
             except Exception:
                 log.exception("Error in coordinator review loop")
@@ -1131,9 +1133,7 @@ async def _run_worker():
         ) as cur:
             recovered_reviewing = [r[0] for r in await cur.fetchall()]
         # Working tasks — check if agent PID is still alive before resetting
-        async with db.db.execute(
-            "SELECT id, agent_pid FROM tasks WHERE status = 'working'"
-        ) as cur:
+        async with db.db.execute("SELECT id, agent_pid FROM tasks WHERE status = 'working'") as cur:
             working_tasks = await cur.fetchall()
 
         recovered_working = []

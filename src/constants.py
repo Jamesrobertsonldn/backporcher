@@ -50,16 +50,18 @@ NAV_MAX_EDGES = 20
 # --- Agent sandbox ---
 
 # Environment variables stripped from agent subprocess (secrets that must not leak)
-SENSITIVE_ENV_VARS = frozenset({
-    "ANTHROPIC_API_KEY",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "BACKPORCHER_DASHBOARD_PASSWORD",
-    "BACKPORCHER_WEBHOOK_URL",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "OPENAI_API_KEY",
-})
+SENSITIVE_ENV_VARS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "BACKPORCHER_DASHBOARD_PASSWORD",
+        "BACKPORCHER_WEBHOOK_URL",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "OPENAI_API_KEY",
+    }
+)
 
 # Credential file permissions (octal)
 CREDENTIAL_FILE_MODE = 0o600
