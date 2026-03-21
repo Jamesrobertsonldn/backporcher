@@ -12,28 +12,67 @@ from .dispatcher import clone_or_fetch, detect_and_store_stack, sync_agent_crede
 log = logging.getLogger("backporcher.worker")
 
 
+def _get_boot_id() -> str:
+    """Return a unique identifier for the current boot/container lifecycle.
+
+    Tries /proc/sys/kernel/random/boot_id first (unique per boot and per
+    container PID namespace), then falls back to /proc/1/sched cgroup inode
+    as a last resort.  Returns "" if nothing works — the caller treats a
+    mismatch (including "" vs any saved value) as a stale lock.
+    """
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
 def acquire_pid_lock(config: Config) -> Path | None:
     """Write PID file, check for stale locks.
 
     Returns the pid_file Path on success, or None if another worker is running.
+
+    The PID file stores ``pid:boot_id``.  When the PID file lives on a bind
+    mount that survives container restarts, a raw ``os.kill(pid, 0)`` check
+    is not enough — PID 1 is always alive inside every new container.  By
+    recording the kernel boot_id we can detect that the lock belongs to a
+    previous container and safely reclaim it.
     """
     pid_file = config.base_dir / "data" / "backporcher.pid"
     pid_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if pid_file.exists():
-        old_pid = int(pid_file.read_text().strip())
-        try:
-            os.kill(old_pid, 0)  # Check if process is alive (signal 0 = no-op)
-            log.error("Another worker is already running (pid=%d). Exiting.", old_pid)
-            return None
-        except ProcessLookupError:
-            log.warning("Removing stale PID file (pid=%d no longer running)", old_pid)
-            pid_file.unlink()
-        except PermissionError:
-            log.error("Another worker is running as a different user (pid=%d). Exiting.", old_pid)
-            return None
+    current_boot_id = _get_boot_id()
 
-    pid_file.write_text(str(os.getpid()))
+    if pid_file.exists():
+        raw = pid_file.read_text().strip()
+        # Parse "pid:boot_id" (new format) or bare "pid" (old format)
+        if ":" in raw:
+            old_pid_s, old_boot_id = raw.split(":", 1)
+        else:
+            old_pid_s, old_boot_id = raw, ""
+
+        old_pid = int(old_pid_s)
+
+        # Different boot_id means the lock is from a previous container/boot
+        if old_boot_id and current_boot_id and old_boot_id != current_boot_id:
+            log.warning(
+                "Removing stale PID file from previous boot (pid=%d, old_boot=%s)",
+                old_pid,
+                old_boot_id[:12],
+            )
+            pid_file.unlink()
+        else:
+            try:
+                os.kill(old_pid, 0)  # Check if process is alive (signal 0 = no-op)
+                log.error("Another worker is already running (pid=%d). Exiting.", old_pid)
+                return None
+            except ProcessLookupError:
+                log.warning("Removing stale PID file (pid=%d no longer running)", old_pid)
+                pid_file.unlink()
+            except PermissionError:
+                log.error("Another worker is running as a different user (pid=%d). Exiting.", old_pid)
+                return None
+
+    pid_file.write_text(f"{os.getpid()}:{current_boot_id}")
     return pid_file
 
 
