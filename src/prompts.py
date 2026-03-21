@@ -12,6 +12,7 @@ Implement directly — do NOT give an approach summary or wait for approval.
 2. Run existing tests after your changes to verify nothing breaks
 3. If you get stuck, commit what you have and document what remains in a TODO comment
 4. Keep changes focused — don't refactor unrelated code
+5. NEVER create, modify, or delete files in .github/workflows/ — CI configuration is maintained separately and must not be changed by automated agents
 """
 
 NAVIGATION_PROMPT = """\
