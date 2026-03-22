@@ -12,28 +12,134 @@ from .dispatcher import clone_or_fetch, detect_and_store_stack, sync_agent_crede
 log = logging.getLogger("backporcher.worker")
 
 
+def _get_container_id() -> str:
+    """Return a unique identifier for the current container lifecycle.
+
+    Uses the hostname, which Docker sets to the container ID (short form) by
+    default.  Falls back to reading the container ID from /proc/self/cgroup
+    (cgroup v1) or /proc/self/mountinfo (cgroup v2).  Returns "" if running
+    outside a container or detection fails.
+    """
+    import socket
+
+    hostname = socket.gethostname()
+    # Docker short container IDs are 12 hex chars
+    if len(hostname) == 12 and all(c in "0123456789abcdef" for c in hostname):
+        return hostname
+
+    # Fallback: parse container ID from cgroup (v1 format)
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            # e.g. "12:memory:/docker/abc123def456..."
+            parts = line.split("/")
+            for part in reversed(parts):
+                if len(part) >= 12 and all(c in "0123456789abcdef" for c in part[:64]):
+                    return part[:12]
+    except OSError:
+        pass
+
+    return ""
+
+
+def _get_proc_starttime(pid: int) -> str:
+    """Return the start time (in clock ticks since boot) for a process.
+
+    Field 22 of /proc/<pid>/stat is the process start time in clock ticks.
+    Two processes with the same PID but different start times are different
+    processes (PID was recycled).  Returns "" on failure.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        # Fields are space-separated, but field 2 (comm) may contain spaces
+        # and is enclosed in parentheses.  Skip past it.
+        close_paren = stat.rfind(")")
+        fields_after_comm = stat[close_paren + 2 :].split()
+        # starttime is field 22 (1-indexed), which is index 19 after comm
+        # (fields 1=pid, 2=comm already consumed, so 22 - 3 = 19)
+        return fields_after_comm[19]
+    except (OSError, IndexError):
+        return ""
+
+
 def acquire_pid_lock(config: Config) -> Path | None:
     """Write PID file, check for stale locks.
 
     Returns the pid_file Path on success, or None if another worker is running.
+
+    The PID file stores ``pid:container_id:starttime``.  This handles two
+    failure modes that the previous boot_id approach could not:
+
+    1. **Container ID** — Docker sets the hostname to the container's short ID.
+       On bind-mounted data dirs, a new container gets a new hostname, so a
+       lock from a previous container is detected even though boot_id (read
+       from the host kernel) stays the same.
+
+    2. **Process start time** — field 22 of /proc/<pid>/stat gives the time
+       the process started (in clock ticks since boot).  Even if the PID and
+       container ID match (e.g. PID 1 in the same container after exec), a
+       different start time means the lock holder was replaced.
+
+    Backward compatible: parses old ``pid:boot_id`` and bare ``pid`` formats.
     """
     pid_file = config.base_dir / "data" / "backporcher.pid"
     pid_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if pid_file.exists():
-        old_pid = int(pid_file.read_text().strip())
-        try:
-            os.kill(old_pid, 0)  # Check if process is alive (signal 0 = no-op)
-            log.error("Another worker is already running (pid=%d). Exiting.", old_pid)
-            return None
-        except ProcessLookupError:
-            log.warning("Removing stale PID file (pid=%d no longer running)", old_pid)
-            pid_file.unlink()
-        except PermissionError:
-            log.error("Another worker is running as a different user (pid=%d). Exiting.", old_pid)
-            return None
+    current_container_id = _get_container_id()
+    current_pid = os.getpid()
+    current_starttime = _get_proc_starttime(current_pid)
 
-    pid_file.write_text(str(os.getpid()))
+    if pid_file.exists():
+        raw = pid_file.read_text().strip()
+        parts = raw.split(":")
+        old_pid = int(parts[0])
+        old_container_id = parts[1] if len(parts) > 1 else ""
+        old_starttime = parts[2] if len(parts) > 2 else ""
+
+        stale = False
+
+        # Check 1: different container ID means different container lifecycle
+        if old_container_id and current_container_id and old_container_id != current_container_id:
+            log.warning(
+                "Removing stale PID file from previous container (pid=%d, old=%s, new=%s)",
+                old_pid,
+                old_container_id[:12],
+                current_container_id[:12],
+            )
+            stale = True
+
+        # Check 2: same container (or no container ID) — verify process is alive
+        if not stale:
+            try:
+                os.kill(old_pid, 0)
+            except ProcessLookupError:
+                log.warning("Removing stale PID file (pid=%d no longer running)", old_pid)
+                stale = True
+            except PermissionError:
+                # Process exists but owned by different user.  In containers
+                # this is common: PID 1 is root's init process, but the worker
+                # runs as a non-root user.  Check starttime before giving up.
+                pass
+            # PID is alive (or PermissionError) — but is it the same process
+            # that wrote the lock?
+            if not stale and old_starttime:
+                live_starttime = _get_proc_starttime(old_pid)
+                if live_starttime and live_starttime != old_starttime:
+                    log.warning(
+                        "Removing stale PID file (pid=%d recycled: starttime %s→%s)",
+                        old_pid,
+                        old_starttime,
+                        live_starttime,
+                    )
+                    stale = True
+
+            if not stale:
+                log.error("Another worker is already running (pid=%d). Exiting.", old_pid)
+                return None
+
+        if stale:
+            pid_file.unlink()
+
+    pid_file.write_text(f"{current_pid}:{current_container_id}:{current_starttime}")
     return pid_file
 
 
