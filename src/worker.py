@@ -66,10 +66,11 @@ class WorkerDaemon:
         ]
 
         if self.config.dashboard_password:
-            from .dashboard import start_dashboard
+            from .dashboard import set_embedded_mode, start_dashboard
 
+            set_embedded_mode()
             loops.append(start_dashboard(self.db, self.config))
-            log.info("Dashboard enabled on port %d", self.config.dashboard_port)
+            log.info("Dashboard enabled on port %d (embedded mode)", self.config.dashboard_port)
         else:
             log.info("Dashboard disabled (no BACKPORCHER_DASHBOARD_PASSWORD set)")
 
