@@ -1,4 +1,6 @@
-"""Dispatch helpers: failure handling, credential sync, retry logic."""
+"""Dispatch helpers: failure handling, credential sync, retry logic, agent fallback."""
+
+from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
@@ -85,6 +87,56 @@ def _pick_retry_model(current_model: str, retry_count: int) -> str:
         log.info("Model escalation: sonnet -> opus (retry %d)", retry_count)
         return "opus"
     return current_model
+
+
+def pick_retry_agent_and_model(task: dict, retry_count: int, config: "Config", backends: dict) -> tuple[str, str]:
+    """Pick agent + model for a retry attempt.
+
+    Strategy (sonnet fails on claude):
+      retry 1: try kimi/sonnet
+      retry 2: try gemini/sonnet
+      retry 3: try claude/opus (escalate model as last resort)
+
+    Never falls back to opencode (local model, lower capability).
+    """
+    current_agent = task.get("agent", config.default_agent)
+    current_model = task.get("model", config.default_model)
+
+    # Try next agent in fallback chain (skips opencode)
+    next_agent = _pick_fallback_agent(task, config)
+    if next_agent and next_agent in backends and next_agent != "opencode":
+        log.info(
+            "Agent fallback: %s -> %s (retry %d)",
+            current_agent,
+            next_agent,
+            retry_count,
+        )
+        return next_agent, current_model
+
+    # No more agents to try — escalate model on original agent
+    escalated = _pick_retry_model(current_model, retry_count)
+    log.info(
+        "Model escalation: %s/%s -> %s/%s (retry %d)",
+        current_agent,
+        current_model,
+        config.default_agent,
+        escalated,
+        retry_count,
+    )
+    return config.default_agent, escalated
+
+
+def _pick_fallback_agent(task: dict, config: Config) -> str | None:
+    """Return the next agent in the fallback chain, or None if exhausted."""
+    chain = config.fallback_chain
+    current = task.get("agent", "claude")
+    try:
+        idx = chain.index(current)
+        if idx + 1 < len(chain):
+            return chain[idx + 1]
+    except ValueError:
+        pass
+    return None
 
 
 async def retry_with_ci_context(

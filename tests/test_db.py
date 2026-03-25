@@ -49,7 +49,7 @@ class TestSchemaMigration:
 
         # Should be latest version
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 8
+        assert cur.fetchone()[0] == 9
 
         # Should have all columns across all migrations
         cur = db.db.execute("PRAGMA table_info(tasks)")
@@ -65,6 +65,8 @@ class TestSchemaMigration:
         assert "agent_finished_at" in columns
         assert "model_used" in columns
         assert "initial_model" in columns
+        assert "agent" in columns
+        assert "agent_fallback_count" in columns
 
         # Should have system_state table
         cur = db.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='system_state'")
@@ -86,7 +88,7 @@ class TestSchemaMigration:
 
         # Version upgraded to latest
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 8
+        assert cur.fetchone()[0] == 9
 
         # Data preserved
         cur = db.db.execute("SELECT COUNT(*) FROM tasks")
@@ -126,7 +128,7 @@ class TestSchemaMigration:
         db.connect()
 
         cur = db.db.execute("SELECT version FROM schema_version")
-        assert cur.fetchone()[0] == 8
+        assert cur.fetchone()[0] == 9
 
         cur = db.db.execute("SELECT COUNT(*) FROM tasks")
         assert cur.fetchone()[0] == 2
