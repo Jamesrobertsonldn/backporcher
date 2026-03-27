@@ -150,7 +150,8 @@ async def run_agent(
                         content_size += len(evt.content)
 
                 elif evt.type in ("result", "error"):
-                    output_summary = evt.content or ""
+                    raw = evt.content or ""
+                    output_summary = str(raw) if not isinstance(raw, str) else raw
                     if evt.is_error:
                         await db.add_log(
                             task["id"],

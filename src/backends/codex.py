@@ -87,7 +87,10 @@ class CodexBackend:
 
         if etype == "turn.failed":
             error = event.get("error", "") or ""
-            return AgentEvent(type="error", content=error, is_error=True, raw=event)
+            # error may be a dict like {"message": "..."} — extract the string
+            if isinstance(error, dict):
+                error = error.get("message", "") or str(error)
+            return AgentEvent(type="error", content=str(error), is_error=True, raw=event)
 
         log.debug("CodexBackend.parse_output_line: unrecognised event type %r", etype)
         return None
