@@ -12,6 +12,29 @@ Implement directly — do NOT give an approach summary or wait for approval.
 2. Run existing tests after your changes to verify nothing breaks
 3. If you get stuck, commit what you have and document what remains in a TODO comment
 4. Keep changes focused — don't refactor unrelated code
+
+## Rust / Clippy Rules (CRITICAL — CI runs `cargo clippy -- -D warnings`)
+CI treats ALL clippy warnings as errors. Your code MUST be clippy-clean:
+- No `unused_mut`: don't write `let mut x` unless you actually mutate `x`
+- No `unused_variables`: prefix unused params with `_` (e.g. `_provider`)
+- No `unused_imports`: remove any `use` statements you don't need
+- Use `is_some_and(|x| ...)` instead of `map_or(false, |x| ...)`
+- Use `is_none_or(|x| ...)` instead of `map_or(true, |x| ...)`
+- No `needless_return`: use expression-style returns, not `return expr;`
+- No `redundant_closure`: use `foo` not `|x| foo(x)` when passing to map/filter
+- No `single_match`: use `if let` instead of `match` with one arm + wildcard
+- Before committing, run: `cargo clippy -p editassist-cli -- -D warnings`
+
+## DAEMON CODE WARNING (CRITICAL)
+CI runs `cargo clippy -p editassist-daemon` with full features on macOS — but this
+container CANNOT compile the daemon crate (missing GTK/Tauri/Metal). The local verify
+command only checks `editassist-cli`. If you modify files under `crates/daemon/`, you
+MUST manually ensure clippy-clean code because your changes CANNOT be verified locally:
+- Double-check every variable is used (CI will catch `unused_variables`)
+- Double-check every import is used (CI will catch `unused_imports`)
+- Don't add struct fields without using them (CI will catch `dead_code`)
+- Don't reference struct fields that don't exist — read the struct definition first
+- Run `grep -n "unused\|dead_code" crates/daemon/src/<file>` to look for existing suppression patterns
 """
 
 NAVIGATION_PROMPT = """\
@@ -55,13 +78,20 @@ GitHub issue, decide which AI agent and model should work on it.
 
 ## Agents Available
 Available agents: {enabled_agents}
-- **claude**: Most capable. Complex multi-file changes, architectural
-  work, cross-file reasoning. Most expensive.
-- **kimi**: Good general capability, cost-effective. Single/multi-file
-  changes, bug fixes.
-- **codex**: OpenAI-backed. Straightforward implementations, boilerplate.
-- **gemini**: Google-backed. Good for general-purpose tasks, research-
-  heavy issues, documentation, and multi-file changes.
+
+Distribute work across agents. Do NOT default to claude for everything.
+
+- **kimi**: DEFAULT CHOICE for most work. Strong general capability,
+  cost-effective. Bug fixes, single/multi-file changes, feature
+  implementations, refactors touching 2-4 files. Use kimi first.
+- **codex**: Good for scoped implementations, single-file features,
+  boilerplate generation, config changes, adding tests, straightforward
+  multi-file changes with clear instructions.
+- **claude**: RESERVE for the hardest tasks only — complex architectural
+  changes, cross-cutting refactors touching 5+ files, new subsystems,
+  state management rewrites. Do not use claude when kimi or codex
+  can handle it.
+- **gemini**: Fallback for overflow. Use only if other agents are busy.
 
 ## Issue
 **Title:** {title}
@@ -88,10 +118,13 @@ for the same repository, analyze them together and produce a plan.
 
 ## Agents Available
 Available agents: {enabled_agents}
-- **claude**: Most capable. Complex multi-file changes, architectural work.
-- **kimi**: Cost-effective. Single/multi-file changes, bug fixes.
-- **codex**: OpenAI-backed. Straightforward implementations, boilerplate.
-- **gemini**: Google-backed. General-purpose, research-heavy issues, docs.
+
+Distribute work across agents — prefer kimi and codex. Reserve claude for hardest tasks.
+
+- **kimi**: DEFAULT for most work. Bug fixes, features, multi-file changes.
+- **codex**: Scoped implementations, boilerplate, config, tests.
+- **claude**: RESERVE for complex architectural work only (5+ files, new subsystems).
+- **gemini**: Overflow/fallback only.
 
 ## Issues (same repo: {repo_name})
 {issues_block}
